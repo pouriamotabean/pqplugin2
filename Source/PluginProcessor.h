@@ -6,9 +6,16 @@
 class PQAudioProcessor : public juce::AudioProcessor
 {
 public:
-    static constexpr int kFFTOrder=13;
+    // FIX (low-frequency resolution): FFT bin spacing is sr/kFFTSize, so with the old 8192-point
+    // FFT each bin covered ~5.4Hz - meaning the lowest octaves (20-80Hz) were built from only a
+    // handful of real measurements no matter how many log-spaced points the display asked for.
+    // That's what read as a "staircase"/pixelated line at the low end. Doubling to 16384 halves
+    // the bin spacing (~2.7Hz) for real extra low-end resolution. The hop is tightened from 1/4 to
+    // 1/8 of the FFT size so the on-screen curve keeps updating every ~2048 samples, same as before -
+    // only the analysis window got bigger, not the refresh latency.
+    static constexpr int kFFTOrder=14;
     static constexpr int kFFTSize=1<<kFFTOrder;
-    static constexpr int kHopSize=kFFTSize/4; // 75% overlap between analysis frames
+    static constexpr int kHopSize=kFFTSize/8;
     static constexpr int kBins=1024;
     static constexpr int kBands=36;
     enum class WidthMode { MicroShift, Haas, Decorrelated };
@@ -52,6 +59,13 @@ public:
     std::atomic<float> lowHz{20},highHz{20000},maxCorrectionDb{6},smoothingOctaves{0.35f};
     std::atomic<float> widthAmount{0},widthDepth{1};
     std::atomic<WidthMode> widthMode{WidthMode::MicroShift};
+    // Input/output trim, in dB, applied at the very start / very end of the chain. Each is user-
+    // draggable from its own vertical meter in the editor. matchGain() is the "MATCH GAIN" button:
+    // it reads the current (already-trimmed) input/output RMS meters and adjusts outputTrimDb so the
+    // processed output sits at the same average level as the input - a quick way to A/B the tonal
+    // change (EQ, width) without the comparison being biased by a loudness difference.
+    std::atomic<float> inputTrimDb{0.f}, outputTrimDb{0.f};
+    void matchGain();
     // Whether the mono-widener runs before the EQ correction (so the analyzer/match "sees" the
     // widened signal) or after it (so widening is the last thing applied to the final output).
     std::atomic<bool> widthPostEq{false};
