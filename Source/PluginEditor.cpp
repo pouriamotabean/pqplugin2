@@ -3,17 +3,26 @@ namespace {juce::Colour white(){return juce::Colour(0xfff2f4f7);} juce::Colour y
 
 PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcessorEditor(&x),p(x){setResizable(true,true);setSize(1180,760);
  setupButton(stereo,white());setupButton(mid,yellow());setupButton(side,blue());for(auto*q:{&capture,&apply,&save,&load,&clear})setupButton(*q,white());
+ setupButton(widthStage,white()); widthStage.setButtonText(p.widthPostEq.load()?"POST":"PRE");
+ // Toggles whether the mono-widener runs before the EQ correction (PRE, so the analyzer/match
+ // "hears" the widened signal) or after it (POST, widening is the very last step on the output).
+ widthStage.onClick=[this]{ bool now=!p.widthPostEq.load(); p.widthPostEq.store(now); widthStage.setButtonText(now?"POST":"PRE"); };
 
- // FIX (bug #4): these three buttons now actually do something. Clicking one flips whether that
- // band's correction is applied to the audio (stereoEnabled / midEnabled / sideEnabled), and
- // refreshBandButtons() dims the button so the on/off state is visible at a glance.
- stereo.onClick=[this]{p.stereoEnabled.store(!p.stereoEnabled.load()); refreshBandButtons();};
- mid.onClick=[this]{p.midEnabled.store(!p.midEnabled.load()); refreshBandButtons();};
- side.onClick=[this]{p.sideEnabled.store(!p.sideEnabled.load()); refreshBandButtons();};
+ // FIX (real solo): clicking a band button now solos it (mutually exclusive) - it mutes the other
+ // band and lets you hear/see that one in isolation, pre-correction. Clicking the active one again
+ // (or clicking STEREO) returns to the normal full, corrected mix.
+ stereo.onClick=[this]{p.solo.store(p.solo.load()==PQAudioProcessor::SoloBand::Stereo?PQAudioProcessor::SoloBand::None:PQAudioProcessor::SoloBand::Stereo); refreshBandButtons();};
+ mid.onClick=[this]{p.solo.store(p.solo.load()==PQAudioProcessor::SoloBand::Mid?PQAudioProcessor::SoloBand::None:PQAudioProcessor::SoloBand::Mid); refreshBandButtons();};
+ side.onClick=[this]{p.solo.store(p.solo.load()==PQAudioProcessor::SoloBand::Side?PQAudioProcessor::SoloBand::None:PQAudioProcessor::SoloBand::Side); refreshBandButtons();};
  refreshBandButtons();
 
  auto bind=[this](juce::Slider&s,std::atomic<float>&v){setupSlider(s,0,100,.1);s.setValue(v.load()*100);s.onValueChange=[this,&s,&v]{v.store((float)s.getValue()/100.f);p.applyMatch();};};bind(sAmt,p.stereoMatch);bind(mAmt,p.midMatch);bind(siAmt,p.sideMatch);
  setupSlider(low,20,20000,1);setupSlider(high,20,20000,1);setupSlider(maxDb,0,12,.1);setupSlider(smooth,.05,1.5,.01);setupSlider(width,0,100,.1);setupSlider(depth,0,200,1);
+ // FIX: the frequency chart is drawn on a log scale (20Hz-20kHz), but these sliders were linear -
+ // that mismatch is exactly why dragging near 20Hz raced across the whole chart while dragging near
+ // 20kHz barely moved the line. A log-style skew around the geometric middle of the range
+ // (sqrt(20*20000)) makes the slider's feel match what's actually drawn.
+ low.setSkewFactorFromMidPoint(632.45); high.setSkewFactorFromMidPoint(632.45);
  low.setValue(p.lowHz);high.setValue(p.highHz);maxDb.setValue(p.maxCorrectionDb);smooth.setValue(p.smoothingOctaves);width.setValue(p.widthAmount.load()*100);depth.setValue(p.widthDepth.load()*100);
  low.onValueChange=[this]{p.lowHz=low.getValue();p.applyMatch();};high.onValueChange=[this]{p.highHz=high.getValue();p.applyMatch();};maxDb.onValueChange=[this]{p.maxCorrectionDb=maxDb.getValue();p.applyMatch();};smooth.onValueChange=[this]{p.smoothingOctaves=smooth.getValue();p.applyMatch();};width.onValueChange=[this]{p.widthAmount=width.getValue()/100.f;};depth.onValueChange=[this]{p.widthDepth=depth.getValue()/100.f;};
  mode.addItem("MICRO SHIFT",1);mode.addItem("HAAS",2);mode.addItem("DECORRELATED",3);mode.setSelectedId((int)p.widthMode.load()+1);mode.onChange=[this]{p.widthMode=(PQAudioProcessor::WidthMode)(mode.getSelectedId()-1);};
@@ -49,8 +58,9 @@ PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcesso
 PQAudioProcessorEditor::~PQAudioProcessorEditor(){ chooser = nullptr; }
 
 void PQAudioProcessorEditor::refreshBandButtons(){
+ auto s=p.solo.load(); bool none = s==PQAudioProcessor::SoloBand::None;
  auto style=[](juce::TextButton&b,juce::Colour c,bool on){ b.setColour(juce::TextButton::textColourOffId, on?c:dim()); b.setColour(juce::TextButton::textColourOnId, on?c:dim()); };
- style(stereo,white(),p.stereoEnabled.load()); style(mid,yellow(),p.midEnabled.load()); style(side,blue(),p.sideEnabled.load());
+ style(stereo,white(),none||s==PQAudioProcessor::SoloBand::Stereo); style(mid,yellow(),none||s==PQAudioProcessor::SoloBand::Mid); style(side,blue(),none||s==PQAudioProcessor::SoloBand::Side);
 }
 
 void PQAudioProcessorEditor::setupButton(juce::TextButton&b,juce::Colour c){addAndMakeVisible(b);b.setColour(juce::TextButton::buttonColourId,panel());b.setColour(juce::TextButton::buttonOnColourId,grid());b.setColour(juce::TextButton::textColourOffId,c);b.setColour(juce::TextButton::textColourOnId,c);}
@@ -77,14 +87,21 @@ void PQAudioProcessorEditor::drawRangeMask(juce::Graphics&g,juce::Rectangle<floa
 void PQAudioProcessorEditor::paint(juce::Graphics&g){g.fillAll(bg());auto a=getLocalBounds().toFloat();g.setColour(white());g.setFont(juce::FontOptions(29).withStyle("bold"));g.drawText("PQ",28,20,62,32,juce::Justification::left);g.setFont(juce::FontOptions(10));g.setColour(muted());g.drawText("PERFECTION OF MATCH EQ   /   POURIA",91,25,330,22,juce::Justification::left);
  auto chart=a.reduced(24,72).withHeight(a.getHeight()*.48f);g.setColour(panel());g.fillRoundedRectangle(chart,14);for(int i=1;i<7;i++){g.setColour(grid());g.drawHorizontalLine((int)(chart.getY()+chart.getHeight()*i/7),chart.getX(),chart.getRight());}for(int i=1;i<12;i++){float x=chart.getX()+chart.getWidth()*i/12;g.setColour(grid());g.drawVerticalLine((int)x,chart.getY(),chart.getBottom());}
  drawRangeMask(g,chart);
- if(p.hasReference.load()){drawRef(g,chart,p.refStereo,white());drawRef(g,chart,p.refMid,yellow());drawRef(g,chart,p.refSide,blue());}drawCurve(g,chart,p.stereoCurve,white());drawCurve(g,chart,p.midCurve,yellow());drawCurve(g,chart,p.sideCurve,blue());
+ // FIX: curve visibility now reflects Solo state - only the soloed band is shown at full brightness
+ // (the other is dimmed), instead of always drawing all three overlapping at full strength.
+ auto s=p.solo.load(); bool none=s==PQAudioProcessor::SoloBand::None;
+ auto curveColour=[&](juce::Colour c,PQAudioProcessor::SoloBand b){ return (none||s==b)?c:c.withAlpha(0.15f); };
+ if(p.hasReference.load()){drawRef(g,chart,p.refStereo,white());drawRef(g,chart,p.refMid,yellow());drawRef(g,chart,p.refSide,blue());}
+ drawCurve(g,chart,p.stereoCurve,curveColour(white(),PQAudioProcessor::SoloBand::Stereo));
+ drawCurve(g,chart,p.midCurve,curveColour(yellow(),PQAudioProcessor::SoloBand::Mid));
+ drawCurve(g,chart,p.sideCurve,curveColour(blue(),PQAudioProcessor::SoloBand::Side));
  label(g,"20 Hz",{chart.getX(),chart.getBottom()-18,60,18},muted());label(g,"1 kHz",{chart.getCentreX()-25,chart.getBottom()-18,50,18},muted());label(g,"20 kHz",{chart.getRight()-60,chart.getBottom()-18,60,18},muted());
  g.setColour(panel());g.fillRoundedRectangle(24,chart.getBottom()+32,a.getWidth()-48,a.getHeight()-chart.getBottom()-56,14);
  label(g,"MATCH AMOUNT",{42,chart.getBottom()+47,150,18},muted());label(g,"FREQUENCY RANGE",{700,chart.getBottom()+47,180,18},muted());label(g,"MONO → STEREO",{42,chart.getBottom()+153,180,18},muted());label(g,"INPUT / OUTPUT",{900,chart.getBottom()+153,150,18},muted());
  int y=(int)chart.getBottom()+70;
  label(g,"STEREO",{45,(float)y+2,80,18},white()); label(g,"MID",{45,(float)y+34,80,18},yellow()); label(g,"SIDE",{45,(float)y+66,80,18},blue());
  label(g,"LOW HZ",{700,(float)y+2,100,18},muted()); label(g,"HIGH HZ",{900,(float)y+2,100,18},muted()); label(g,"MAX dB",{700,(float)y+34,100,18},muted()); label(g,"SMOOTHING",{900,(float)y+34,100,18},muted());
- label(g,"MODE",{210,(float)y+100,100,18},muted()); label(g,"WIDTH AMT",{410,(float)y+100,100,18},muted()); label(g,"DEPTH %",{410,(float)y+132,100,18},muted());
+ label(g,"MODE",{210,(float)y+100,100,18},muted()); label(g,"WIDTH AMT",{410,(float)y+100,100,18},muted()); label(g,"STAGE",{210,(float)y+132,100,18},muted()); label(g,"DEPTH %",{410,(float)y+132,100,18},muted());
  g.setColour(white());g.drawText(juce::String(p.inputRmsDb.load(),1)+" dB  →  "+juce::String(p.outputRmsDb.load(),1)+" dB",900,(int)(chart.getBottom()+171),200,20,juce::Justification::left);
 }
-void PQAudioProcessorEditor::resized(){auto a=getLocalBounds();stereo.setBounds(a.getRight()-305,18,90,36);mid.setBounds(a.getRight()-207,18,90,36);side.setBounds(a.getRight()-109,18,90,36);auto chart=a.reduced(24,72).withHeight(a.getHeight()*.48f);int y=chart.getBottom()+70;sAmt.setBounds(145,y,470,22);mAmt.setBounds(145,y+32,470,22);siAmt.setBounds(145,y+64,470,22);low.setBounds(700,y+18,185,22);high.setBounds(900,y+18,185,22);maxDb.setBounds(700,y+50,185,22);smooth.setBounds(900,y+50,185,22);mode.setBounds(210,y+115,180,25);width.setBounds(410,y+115,250,25);depth.setBounds(410,y+147,250,25);capture.setBounds(42,y+190,90,30);apply.setBounds(140,y+190,80,30);save.setBounds(230,y+190,70,30);load.setBounds(308,y+190,70,30);clear.setBounds(386,y+190,75,30);status.setBounds(a.getRight()-320,y+190,300,30);}
+void PQAudioProcessorEditor::resized(){auto a=getLocalBounds();stereo.setBounds(a.getRight()-305,18,90,36);mid.setBounds(a.getRight()-207,18,90,36);side.setBounds(a.getRight()-109,18,90,36);auto chart=a.reduced(24,72).withHeight(a.getHeight()*.48f);int y=chart.getBottom()+70;sAmt.setBounds(145,y,470,22);mAmt.setBounds(145,y+32,470,22);siAmt.setBounds(145,y+64,470,22);low.setBounds(700,y+18,185,22);high.setBounds(900,y+18,185,22);maxDb.setBounds(700,y+50,185,22);smooth.setBounds(900,y+50,185,22);mode.setBounds(210,y+115,180,25);width.setBounds(410,y+115,250,25);widthStage.setBounds(210,y+147,90,25);depth.setBounds(410,y+147,250,25);capture.setBounds(42,y+190,90,30);apply.setBounds(140,y+190,80,30);save.setBounds(230,y+190,70,30);load.setBounds(308,y+190,70,30);clear.setBounds(386,y+190,75,30);status.setBounds(a.getRight()-320,y+190,300,30);}
