@@ -130,5 +130,15 @@ private:
     static float interpAtomic(const std::array<std::atomic<float>,kBins>&,float);
     void analyzeAndUpdate(); void buildCorrection(std::array<float,kBands>&,const std::array<std::atomic<float>,kBins>&,const std::array<float,kBins>&,float);
     void rebuildCoefficients(); static Coeff peak(float,float,float,float); static float process(const Coeff&,State&,float);
+    // Shared by setStateInformation() (host session restore) AND saveReference/loadReference (the
+    // on-disk .pqref "preset" file - see item 6): a preset is now just the full plugin state, so
+    // both paths funnel through the exact same parser/writer. Understands two on-disk formats:
+    //   - legacy "PRQ3" (0x50525133): old reference-only .pqref files from before presets existed.
+    //     Only the reference curves + low/high/cap/smoothing are read; everything else already
+    //     loaded (manual EQ, width, trims, match amounts...) is left completely untouched, so an old
+    //     file never wipes out settings it never knew about.
+    //   - current "PQS8" (0x50515338) and its older PQS-prefixed ancestors: full processor state.
+    // Returns false (without side effects beyond what was already read) if the magic is unrecognised.
+    bool applyStateBlock(const void* data, int size);
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PQAudioProcessor)
 };
