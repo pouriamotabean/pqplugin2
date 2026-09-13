@@ -11,8 +11,72 @@ juce::Colour manualTargetColour(PQAudioProcessor::ManualTarget t){
 }
 }
 
-PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcessorEditor(&x),p(x){setResizable(true,true);setSize(1180,760);
- setupButton(stereo,white());setupButton(mid,yellow());setupButton(side,blue());for(auto*q:{&capture,&apply,&save,&load,&clear})setupButton(*q,white());
+// ---- PresetPanel (item 6) ----------------------------------------------------------------------
+juce::File PresetPanel::presetDir(){
+    auto dir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("PQ Presets");
+    if(!dir.isDirectory()) dir.createDirectory();
+    return dir;
+}
+PresetPanel::PresetPanel(PQAudioProcessor& proc):p(proc){
+    setOpaque(true);
+    addAndMakeVisible(title); title.setColour(juce::Label::textColourId, white()); title.setFont(juce::FontOptions(13).withStyle("bold"));
+    addAndMakeVisible(list); list.setTextWhenNothingSelected("Select a preset to load...");
+    list.onChange=[this]{
+        auto name=list.getText(); if(name.isEmpty()) return;
+        auto f=presetDir().getChildFile(name+".pqref");
+        if(p.loadReference(f) && onPresetLoaded) onPresetLoaded();
+    };
+    addAndMakeVisible(nameBox); nameBox.setTextToShowWhenEmpty("New preset name...",muted()); nameBox.setColour(juce::TextEditor::backgroundColourId,bg()); nameBox.setColour(juce::TextEditor::textColourId,white());
+    for(auto*b:{&saveBtn,&deleteBtn,&closeBtn}){ addAndMakeVisible(*b); b->setColour(juce::TextButton::buttonColourId,panel()); b->setColour(juce::TextButton::textColourOffId,white()); b->setColour(juce::TextButton::textColourOnId,white()); }
+    saveBtn.onClick=[this]{
+        auto name=nameBox.getText().trim();
+        if(name.isEmpty()) name = "Preset " + juce::Time::getCurrentTime().formatted("%Y-%m-%d %H-%M-%S");
+        // Strip characters that aren't safe in a filename, so a pasted-in name can't break the save.
+        juce::String safe; for(auto c:name) safe += juce::CharacterFunctions::isLetterOrDigit(c)||c==' '||c=='-'||c=='_' ? juce::String::charToString(c) : juce::String();
+        if(safe.isEmpty()) safe="Preset";
+        auto f=presetDir().getChildFile(safe+".pqref");
+        p.saveReference(f);
+        nameBox.setText({},juce::dontSendNotification);
+        refreshList();
+    };
+    deleteBtn.onClick=[this]{
+        auto name=list.getText(); if(name.isEmpty()) return;
+        presetDir().getChildFile(name+".pqref").deleteFile();
+        refreshList();
+    };
+    closeBtn.onClick=[this]{ setVisible(false); };
+    refreshList();
+}
+void PresetPanel::refreshList(){
+    list.clear(juce::dontSendNotification);
+    auto files = presetDir().findChildFiles(juce::File::findFiles,false,"*.pqref");
+    files.sort();
+    int id=1;
+    for(auto& f:files) list.addItem(f.getFileNameWithoutExtension(), id++);
+    list.setSelectedId(0,juce::dontSendNotification);
+}
+void PresetPanel::paint(juce::Graphics& g){
+    g.fillAll(panel());
+    g.setColour(grid()); g.drawRect(getLocalBounds(),1);
+}
+void PresetPanel::resized(){
+    auto a=getLocalBounds().reduced(10);
+    title.setBounds(a.removeFromTop(20));
+    closeBtn.setBounds(getLocalBounds().getRight()-28,4,24,20);
+    a.removeFromTop(6);
+    list.setBounds(a.removeFromTop(26));
+    a.removeFromTop(10);
+    nameBox.setBounds(a.removeFromTop(26));
+    a.removeFromTop(8);
+    auto row=a.removeFromTop(28);
+    saveBtn.setBounds(row.removeFromLeft(row.getWidth()/2-4));
+    row.removeFromLeft(8);
+    deleteBtn.setBounds(row);
+}
+
+PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcessorEditor(&x),p(x),presetPanel(x){setResizable(true,true);setSize(1180,760);
+ setWantsKeyboardFocus(true); // FIX (item 4): needed so this component (not a child control) receives Delete/Backspace
+ setupButton(stereo,white());setupButton(mid,yellow());setupButton(side,blue());for(auto*q:{&capture,&apply,&clear})setupButton(*q,white());
  setupButton(widthStage,white()); widthStage.setButtonText(p.widthPostEq.load()?"POST":"PRE");
  // Toggles whether the mono-widener runs before the EQ correction (PRE, so the analyzer/match
  // "hears" the widened signal) or after it (POST, widening is the very last step on the output).
@@ -25,6 +89,14 @@ PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcesso
  mid.onClick=[this]{p.solo.store(p.solo.load()==PQAudioProcessor::SoloBand::Mid?PQAudioProcessor::SoloBand::None:PQAudioProcessor::SoloBand::Mid); refreshBandButtons();};
  side.onClick=[this]{p.solo.store(p.solo.load()==PQAudioProcessor::SoloBand::Side?PQAudioProcessor::SoloBand::None:PQAudioProcessor::SoloBand::Side); refreshBandButtons();};
  refreshBandButtons();
+
+ // FIX (item 3): one show/hide checkbox per manual-EQ target, tinted to match that target's node/
+ // curve colour so it's obvious at a glance which switch controls which line. Purely a display
+ // filter - repaint() is all that's needed, the underlying bands and audio are untouched.
+ for(auto* t:{&stereoEqToggle,&midEqToggle,&sideEqToggle}){ addAndMakeVisible(*t); t->setToggleState(true,juce::dontSendNotification); t->onClick=[this]{repaint();}; }
+ stereoEqToggle.setColour(juce::ToggleButton::tickColourId, manualStereoColour());
+ midEqToggle.setColour(juce::ToggleButton::tickColourId, manualMidColour());
+ sideEqToggle.setColour(juce::ToggleButton::tickColourId, manualSideColour());
 
  auto bind=[this](juce::Slider&s,std::atomic<float>&v){setupSlider(s,0,100,.1);s.setValue(v.load()*100);s.onValueChange=[this,&s,&v]{v.store((float)s.getValue()/100.f);p.applyMatch();};};bind(sAmt,p.stereoMatch);bind(mAmt,p.midMatch);bind(siAmt,p.sideMatch);
  setupSlider(low,20,20000,1);setupSlider(high,20,20000,1);setupSlider(width,0,100,.1);setupSlider(depth,0,200,1);
@@ -49,34 +121,35 @@ PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcesso
  mode.addItem("MICRO SHIFT",1);mode.addItem("HAAS",2);mode.addItem("DECORRELATED",3);mode.setSelectedId((int)p.widthMode.load()+1);mode.onChange=[this]{p.widthMode=(PQAudioProcessor::WidthMode)(mode.getSelectedId()-1);};
  capture.onClick=[this]{p.captureReference();status.setText("REFERENCE CAPTURED",juce::dontSendNotification);};apply.onClick=[this]{p.applyMatch();status.setText("MATCH UPDATED",juce::dontSendNotification);};clear.onClick=[this]{p.clearReference();status.setText("REFERENCE CLEARED",juce::dontSendNotification);};
 
- // FIX (bug #1): file dialogs are now async (launchAsync + callback) instead of the old blocking
- // browseForFileToSave()/browseForFileToOpen(). Blocking modal dialogs from inside a plugin can hang
- // or misbehave in hosts that run the UI on a message thread they control tightly (Cubase included) -
- // this is the most likely single cause of the host "acting up" that was described.
- save.onClick=[this]{
-     chooser = std::make_unique<juce::FileChooser>("Save PQ Reference", juce::File(), "*.pqref");
-     auto flags = juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::warnAboutOverwriting;
-     chooser->launchAsync(flags, [this](const juce::FileChooser& fc){
-         auto f = fc.getResult();
-         if (f == juce::File()) return;
-         if (!f.hasFileExtension(".pqref")) f = f.withFileExtension(".pqref");
-         if (p.saveReference(f)) status.setText("REFERENCE SAVED", juce::dontSendNotification);
-         else status.setText("SAVE FAILED", juce::dontSendNotification);
-     });
- };
- load.onClick=[this]{
-     chooser = std::make_unique<juce::FileChooser>("Load PQ Reference", juce::File(), "*.pqref");
-     chooser->launchAsync(juce::FileBrowserComponent::openMode, [this](const juce::FileChooser& fc){
-         auto f = fc.getResult();
-         if (f == juce::File()) return;
-         if (p.loadReference(f)){ status.setText("REFERENCE LOADED", juce::dontSendNotification); low.setValue(p.lowHz,juce::dontSendNotification); high.setValue(p.highHz,juce::dontSendNotification); }
-         else status.setText("LOAD FAILED (bad file)", juce::dontSendNotification);
-     });
- };
+ // FIX (item 6): SAVE/LOAD are gone from the bottom row. A single PRESETS button up top toggles a
+ // small overlay (presetPanel) with the file list + Save/Delete - closer to how "professional"
+ // plugins present preset browsing, and it stays out of the way (closed) until asked for.
+ setupButton(presetsBtn,white());
+ presetsBtn.onClick=[this]{ presetPanel.setVisible(!presetPanel.isVisible()); if(presetPanel.isVisible()) presetPanel.toFront(true); };
+ presetPanel.onPresetLoaded=[this]{ syncControlsFromProcessor(); status.setText("PRESET LOADED",juce::dontSendNotification); };
+ addChildComponent(presetPanel); // starts hidden
 
  addAndMakeVisible(mode);addAndMakeVisible(status);status.setColour(juce::Label::textColourId,muted());status.setJustificationType(juce::Justification::centredRight);startTimerHz(20);
 }
-PQAudioProcessorEditor::~PQAudioProcessorEditor(){ chooser = nullptr; }
+PQAudioProcessorEditor::~PQAudioProcessorEditor(){ setLookAndFeel(nullptr); }
+
+// FIX (item 6): after a preset load, far more than just the reference curve may have changed
+// (manual EQ is read straight from the processor every paint, but the plain juce::Slider/ComboBox
+// controls below the chart cache their own value and need to be told explicitly).
+void PQAudioProcessorEditor::syncControlsFromProcessor(){
+ sAmt.setValue(p.stereoMatch.load()*100,juce::dontSendNotification);
+ mAmt.setValue(p.midMatch.load()*100,juce::dontSendNotification);
+ siAmt.setValue(p.sideMatch.load()*100,juce::dontSendNotification);
+ low.setValue(p.lowHz.load(),juce::dontSendNotification);
+ high.setValue(p.highHz.load(),juce::dontSendNotification);
+ width.setValue(p.widthAmount.load()*100,juce::dontSendNotification);
+ depth.setValue(p.widthDepth.load()*100,juce::dontSendNotification);
+ mode.setSelectedId((int)p.widthMode.load()+1,juce::dontSendNotification);
+ widthStage.setButtonText(p.widthPostEq.load()?"POST":"PRE");
+ inputTrim.setValue(p.inputTrimDb.load(),juce::dontSendNotification);
+ outputTrim.setValue(p.outputTrimDb.load(),juce::dontSendNotification);
+ repaint();
+}
 
 void PQAudioProcessorEditor::refreshBandButtons(){
  auto s=p.solo.load(); bool none = s==PQAudioProcessor::SoloBand::None;
@@ -158,6 +231,23 @@ void PQAudioProcessorEditor::drawVerticalMeter(juce::Graphics&g,juce::Rectangle<
  float py=fillR.getBottom()-fillR.getHeight()*tp;
  g.setColour(juce::Colours::white.withAlpha(.9f));
  g.fillRect(juce::Rectangle<float>(fillR.getX(),py-1.f,fillR.getWidth(),2.f));
+ // FIX (item 1): dB graduation marks down the meter, like a measuring cylinder, so the bar reads as
+ // an actual scale instead of a plain unlabeled fill. Ticks at 0/-6/-12/-24/-40/-60dB; only the
+ // outermost two get a printed number (0 and the floor) to keep the narrow meter from looking busy,
+ // the rest are just short tick lines.
+ static const float ticks[]={0.f,-6.f,-12.f,-24.f,-40.f,-60.f};
+ g.setFont(juce::FontOptions(7.5f));
+ for(float db:ticks){
+     float tt=juce::jlimit(0.f,1.f,(db-kFloorDb)/(0.f-kFloorDb));
+     float y=fillR.getBottom()-fillR.getHeight()*tt;
+     g.setColour(juce::Colours::black.withAlpha(0.55f));
+     g.fillRect(juce::Rectangle<float>(fillR.getX(),y-0.5f,fillR.getWidth()*0.32f,1.f));
+     g.fillRect(juce::Rectangle<float>(fillR.getRight()-fillR.getWidth()*0.32f,y-0.5f,fillR.getWidth()*0.32f,1.f));
+     if(db==0.f||db==-60.f){
+         g.setColour(muted());
+         g.drawText(juce::String((int)db),r.getRight()+2.f,y-5.f,20.f,10.f,juce::Justification::left);
+     }
+ }
 }
 
 void PQAudioProcessorEditor::drawFreqDbAxis(juce::Graphics& g, juce::Rectangle<float> chart){
@@ -192,8 +282,14 @@ float PQAudioProcessorEditor::gainDbToY(float gainDb) const{ float t=juce::jmap(
 
 int PQAudioProcessorEditor::findBandNear(juce::Point<float> pos) const{
     constexpr float grabRadius=14.f; int best=-1; float bestDist=grabRadius;
+    using MT=PQAudioProcessor::ManualTarget;
     for(int i=0;i<PQAudioProcessor::kMaxManualBands;++i){
         auto& mb=p.manualBands[(size_t)i]; if(!mb.active.load()) continue;
+        // FIX (item 3): a hidden target's nodes shouldn't be grabbable either - otherwise unchecking
+        // a line still lets you accidentally drag an invisible node.
+        auto target=mb.target.load();
+        bool visible = target==MT::Mid ? midEqToggle.getToggleState() : target==MT::Side ? sideEqToggle.getToggleState() : stereoEqToggle.getToggleState();
+        if(!visible) continue;
         juce::Point<float> node(freqToX(mb.freq.load()), gainDbToY(mb.gainDb.load()));
         float d=node.getDistanceFrom(pos);
         if(d<bestDist){ bestDist=d; best=i; }
@@ -241,7 +337,13 @@ void PQAudioProcessorEditor::drawManualEq(juce::Graphics& g){
         for(int i=0;i<PQAudioProcessor::kMaxManualBands;++i){ auto& mb=p.manualBands[(size_t)i]; if(mb.active.load()&&mb.target.load()==target) return true; }
         return false;
     };
+    // FIX (item 3): per-target visibility checkboxes. Purely a display filter - hidden bands keep
+    // running in the audio and keep responding to drag/scroll, they just aren't drawn.
+    auto targetVisible=[&](MT target){
+        switch(target){ case MT::Mid: return midEqToggle.getToggleState(); case MT::Side: return sideEqToggle.getToggleState(); default: return stereoEqToggle.getToggleState(); }
+    };
     auto drawTargetCurve=[&](MT target,juce::Colour c){
+        if(!targetVisible(target)) return;
         if(!anyActive(target)) return;
         constexpr int kPts=200; juce::Path curve;
         for(int px=0; px<=kPts; ++px){
@@ -255,24 +357,30 @@ void PQAudioProcessorEditor::drawManualEq(juce::Graphics& g){
     drawTargetCurve(MT::Mid, manualMidColour());
     drawTargetCurve(MT::Side, manualSideColour());
 
-    // Draggable node handles - every band is drawn regardless of target, coloured to match.
+    // Draggable node handles - every visible-target band is drawn, coloured to match.
     for(int i=0;i<PQAudioProcessor::kMaxManualBands;++i){
         auto& mb=p.manualBands[(size_t)i]; if(!mb.active.load()) continue;
+        if(!targetVisible(mb.target.load())) continue;
         float x=freqToX(mb.freq.load()), y=gainDbToY(mb.gainDb.load());
         bool isDragging=(draggingBand==i);
+        // FIX (item 4): the selected node (last one clicked, whether or not it's mid-drag right now)
+        // gets a filled centre dot so it's visually clear which node Delete/Backspace will remove.
+        bool isSelected=(selectedBand==i);
         juce::Colour c=manualTargetColour(mb.target.load());
         g.setColour(c.withAlpha(isDragging?1.0f:0.9f));
         g.drawEllipse(x-6,y-6,12,12,2.0f);
+        if(isSelected) g.fillEllipse(x-2.5f,y-2.5f,5.f,5.f);
         if(isDragging){ g.setColour(juce::Colours::white); g.setFont(juce::FontOptions(10));
             g.drawText(manualTypeLabel(mb.type.load())+"  "+juce::String(mb.freq.load(),0)+"Hz  "+juce::String(mb.gainDb.load(),1)+"dB  Q"+juce::String(mb.q.load(),2), (int)x+10,(int)y-20,220,16,juce::Justification::left); }
     }
 }
 
 void PQAudioProcessorEditor::mouseDown(const juce::MouseEvent& e){
-    if(!chartArea.contains(e.position)){ draggingBand=-1; return; }
+    grabKeyboardFocus(); // FIX (item 4): so a subsequent Delete/Backspace reaches keyPressed() below
+    if(!chartArea.contains(e.position)){ draggingBand=-1; selectedBand=-1; return; }
     int hit=findBandNear(e.position);
     if(e.mods.isRightButtonDown()){
-        if(hit>=0) showBandTypeMenu(hit, e.getScreenPosition());
+        if(hit>=0){ selectedBand=hit; showBandTypeMenu(hit, e.getScreenPosition()); }
         else showAddBandMenu(e.position, e.getScreenPosition());
         return;
     }
@@ -282,7 +390,7 @@ void PQAudioProcessorEditor::mouseDown(const juce::MouseEvent& e){
         hit=p.addManualBand(PQAudioProcessor::ManualType::Bell, xToFreq(e.position.x), yToGainDb(e.position.y), 0.7f);
         repaint();
     }
-    draggingBand=hit; draggedPastThreshold=false; mouseDownPos=e.position;
+    draggingBand=hit; selectedBand=hit; draggedPastThreshold=false; mouseDownPos=e.position;
 }
 void PQAudioProcessorEditor::mouseDrag(const juce::MouseEvent& e){
     if(draggingBand<0) return;
@@ -305,15 +413,27 @@ void PQAudioProcessorEditor::mouseWheelMove(const juce::MouseEvent& e, const juc
     p.setManualBandQ(hit,q);
     repaint();
 }
+// FIX (item 4): Delete/Backspace removes the currently selected manual-EQ node (see mouseDown,
+// which sets selectedBand on every left- or right-click that hits an existing node).
+bool PQAudioProcessorEditor::keyPressed(const juce::KeyPress& k){
+    if(selectedBand>=0 && (k==juce::KeyPress::deleteKey || k==juce::KeyPress::backspaceKey)){
+        p.removeManualBand(selectedBand);
+        if(draggingBand==selectedBand) draggingBand=-1;
+        selectedBand=-1;
+        repaint();
+        return true;
+    }
+    return false;
+}
 void PQAudioProcessorEditor::showBandTypeMenu(int bandIndex, juce::Point<int> screenPos){
     using T=PQAudioProcessor::ManualType;
-    juce::PopupMenu m;
+    juce::PopupMenu m; m.setLookAndFeel(&bigMenuLnf); // FIX (item 5): 3x larger menu text
     m.addItem(1,"Bell"); m.addItem(2,"Low Shelf"); m.addItem(3,"High Shelf"); m.addItem(4,"Low Cut"); m.addItem(5,"High Cut"); m.addItem(6,"Notch");
     m.addSeparator(); m.addItem(7,"Delete Band");
     juce::PopupMenu::Options opts; opts = opts.withTargetScreenArea(juce::Rectangle<int>(screenPos,screenPos));
     m.showMenuAsync(opts, [this,bandIndex](int result){
         if(result==0) return;
-        if(result==7){ p.removeManualBand(bandIndex); repaint(); return; }
+        if(result==7){ p.removeManualBand(bandIndex); if(selectedBand==bandIndex) selectedBand=-1; repaint(); return; }
         static const T types[]={T::Bell,T::LowShelf,T::HighShelf,T::LowCut,T::HighCut,T::Notch};
         p.setManualBandType(bandIndex, types[result-1]); repaint();
     });
@@ -323,13 +443,15 @@ void PQAudioProcessorEditor::showAddBandMenu(juce::Point<float> chartPos, juce::
     // FIX (item 2): right-click on empty chart now asks for Target (Stereo/Mid/Side) as well as
     // filter Type, via one submenu per target. Result ids are offset per target (Stereo 1-6,
     // Mid 11-16, Side 21-26) so a single callback can decode both from the chosen id.
-    auto typeSubMenu=[](int base){
-        juce::PopupMenu sub;
+    // FIX (item 5): each submenu is its own PopupMenu instance under the hood, so the bigger font
+    // has to be set on it individually too - setting it only on the parent `m` doesn't propagate.
+    auto typeSubMenu=[this](int base){
+        juce::PopupMenu sub; sub.setLookAndFeel(&bigMenuLnf);
         sub.addItem(base+1,"Bell"); sub.addItem(base+2,"Low Shelf"); sub.addItem(base+3,"High Shelf");
         sub.addItem(base+4,"Low Cut"); sub.addItem(base+5,"High Cut"); sub.addItem(base+6,"Notch");
         return sub;
     };
-    juce::PopupMenu m;
+    juce::PopupMenu m; m.setLookAndFeel(&bigMenuLnf); // FIX (item 5): 3x larger menu text
     m.addSubMenu("Stereo", typeSubMenu(0));
     m.addSubMenu("Mid",    typeSubMenu(10));
     m.addSubMenu("Side",   typeSubMenu(20));
@@ -378,7 +500,11 @@ void PQAudioProcessorEditor::paint(juce::Graphics&g){g.fillAll(bg());auto a=getL
  drawManualEq(g);
  g.restoreState();
  label(g,"20 Hz",{chart.getX(),chart.getBottom()-18,60,18},muted());label(g,"1 kHz",{chart.getCentreX()-25,chart.getBottom()-18,50,18},muted());label(g,"20 kHz",{chart.getRight()-60,chart.getBottom()-18,60,18},muted());
- label(g,"CLICK: ADD BAND    RIGHT-CLICK: TYPE+TARGET / DELETE    DRAG: FREQ+GAIN    SCROLL: Q",{chart.getX(),chart.getY()-16,600,14},muted());
+ label(g,"CLICK: ADD BAND   RIGHT-CLICK: TYPE+TARGET/DELETE   DRAG: FREQ+GAIN   SCROLL: Q   DEL: REMOVE SELECTED",{chart.getX(),chart.getY()-16,700,14},muted());
+ // FIX (item 3): tiny labels for the three show/hide checkboxes, coloured to match their target.
+ label(g,"STEREO",{stereo.getRight()-90.f,54.f,80,12},manualStereoColour());
+ label(g,"MID",{mid.getRight()-90.f,54.f,80,12},manualMidColour());
+ label(g,"SIDE",{side.getRight()-90.f,54.f,80,12},manualSideColour());
  g.setColour(panel());g.fillRoundedRectangle(24,chart.getBottom()+32,a.getWidth()-48,a.getHeight()-chart.getBottom()-56,14);
  label(g,"MATCH AMOUNT",{42,chart.getBottom()+47,150,18},muted());label(g,"FREQUENCY RANGE",{700,chart.getBottom()+47,180,18},muted());label(g,"MONO → STEREO",{42,chart.getBottom()+153,180,18},muted());
  int y=(int)chart.getBottom()+70;
@@ -400,8 +526,20 @@ void PQAudioProcessorEditor::paint(juce::Graphics&g){g.fillAll(bg());auto a=getL
  // instead of removing the (still useful) shared line.
  label(g,"STATUS",{(float)(a.getRight()-320),(float)y+190-16,100,14},muted());
 }
-void PQAudioProcessorEditor::resized(){auto a=getLocalBounds();stereo.setBounds(a.getRight()-305,18,90,36);mid.setBounds(a.getRight()-207,18,90,36);side.setBounds(a.getRight()-109,18,90,36);auto chart=a.reduced(24,72).withHeight(a.getHeight()*.48f);int y=chart.getBottom()+70;sAmt.setBounds(145,y,470,22);mAmt.setBounds(145,y+32,470,22);siAmt.setBounds(145,y+64,470,22);low.setBounds(700,y+18,185,22);high.setBounds(900,y+18,185,22);
+void PQAudioProcessorEditor::resized(){auto a=getLocalBounds();
+ // FIX (item 6): PRESETS sits left of STEREO/MID/SIDE at the top, matching where a "professional"
+ // plugin's preset browser button usually lives.
+ presetsBtn.setBounds(a.getRight()-403,18,90,36);
+ stereo.setBounds(a.getRight()-305,18,90,36);mid.setBounds(a.getRight()-207,18,90,36);side.setBounds(a.getRight()-109,18,90,36);
+ // FIX (item 3): small show/hide checkboxes just under each STEREO/MID/SIDE button.
+ stereoEqToggle.setBounds(a.getRight()-305,54,90,16); midEqToggle.setBounds(a.getRight()-207,54,90,16); sideEqToggle.setBounds(a.getRight()-109,54,90,16);
+ auto chart=a.reduced(24,72).withHeight(a.getHeight()*.48f);int y=chart.getBottom()+70;sAmt.setBounds(145,y,470,22);mAmt.setBounds(145,y+32,470,22);siAmt.setBounds(145,y+64,470,22);low.setBounds(700,y+18,185,22);high.setBounds(900,y+18,185,22);
  inputMeterArea={700.f,(float)(y+62),70.f,108.f}; outputMeterArea={900.f,(float)(y+62),70.f,108.f};
  inputTrim.setBounds(inputMeterArea.toNearestInt()); outputTrim.setBounds(outputMeterArea.toNearestInt());
  matchGainBtn.setBounds(785,y+101,100,30);
- mode.setBounds(210,y+115,180,25);width.setBounds(410,y+115,250,25);widthStage.setBounds(210,y+147,90,25);depth.setBounds(410,y+147,250,25);capture.setBounds(42,y+190,90,30);apply.setBounds(140,y+190,80,30);save.setBounds(230,y+190,70,30);load.setBounds(308,y+190,70,30);clear.setBounds(386,y+190,75,30);status.setBounds(a.getRight()-320,y+190,300,30);}
+ mode.setBounds(210,y+115,180,25);width.setBounds(410,y+115,250,25);widthStage.setBounds(210,y+147,90,25);depth.setBounds(410,y+147,250,25);capture.setBounds(42,y+190,90,30);apply.setBounds(140,y+190,80,30);clear.setBounds(230,y+190,75,30);status.setBounds(a.getRight()-320,y+190,300,30);
+ // FIX (item 6): preset overlay - anchored top-right under the header buttons. It's only visible
+ // while PRESETS is toggled on, so briefly covering part of the analyzer chart while browsing/
+ // saving presets is expected (same as most plugins' preset browsers).
+ presetPanel.setBounds(a.getRight()-403,60,384,230);
+}
