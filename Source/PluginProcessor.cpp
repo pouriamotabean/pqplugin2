@@ -25,41 +25,97 @@ float PQAudioProcessor::interpAtomic(const std::array<std::atomic<float>,kBins>&
 void PQAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer&){
     juce::ScopedNoDenormals nd; const int ch=b.getNumChannels(), n=b.getNumSamples(); if(ch==0)return;
     float inSum=0,outSum=0;
+    const SoloBand soloNow = solo.load();
+    const float widthAmt=juce::jlimit(0.f,1.f,widthAmount.load());
+    const float widthDep=widthDepth.load();
+    const WidthMode wMode=widthMode.load();
+    const bool widthPost=widthPostEq.load();
     for(int i=0;i<n;++i){
         float L=b.getSample(0,i), R=ch>1?b.getSample(1,i):L; inSum += .5f*(L*L+R*R);
-        if(ch==1){
-            float a=juce::jlimit(0.f,1.f,widthAmount.load());
-            if(a>0.0001f){
-                float delayed=widthDelay[widthWrite]; widthDelay[widthWrite]=L; widthWrite=(widthWrite+1)&63;
-                float side=0;
-                switch(widthMode.load()){
-                    case WidthMode::MicroShift: side=(L-delayed)*0.5f; break;
-                    case WidthMode::Haas: side=L-delayed; break;
-                    case WidthMode::Decorrelated: { float d=widthDelay[(widthWrite+17)&63]; side=(L-d)*0.7071f; break; }
-                }
-                side*=a*widthDepth.load(); L=L; R=L-side; L=L+side;
-            } else R=L;
-        }
+
+        // FIX: the widener used to only run when ch==1 (a literal mono buffer), but a DAW mixer
+        // channel almost always presents 2 channels even for mono source material (dual-mono), so
+        // that branch effectively never fired. It now drives off the current mono content
+        // (average of L/R when stereo) instead, so it actually works in normal use.
+        auto applyWidth=[&](float& Lx,float& Rx){
+            if(widthAmt<=0.0001f) return;
+            float monoIn = ch>1 ? 0.5f*(Lx+Rx) : Lx;
+            float delayed=widthDelay[widthWrite]; widthDelay[widthWrite]=monoIn; widthWrite=(widthWrite+1)&63;
+            float side=0.f;
+            switch(wMode){
+                case WidthMode::MicroShift: side=(monoIn-delayed)*0.5f; break;
+                case WidthMode::Haas: side=monoIn-delayed; break;
+                case WidthMode::Decorrelated: { float d=widthDelay[(widthWrite+17)&63]; side=(monoIn-d)*0.7071f; break; }
+            }
+            side*=widthAmt*widthDep; Lx=monoIn+side; Rx=monoIn-side;
+        };
+
+        if(!widthPost) applyWidth(L,R);
+
         float m=.5f*(L+R), s=.5f*(L-R);
-        if(dirty.exchange(false)) rebuildCoefficients();
-        if(midEnabled.load()) for(int k=0;k<kBands;++k) m=process(midCoeff[k],stMid[k],m);
-        if(sideEnabled.load()) for(int k=0;k<kBands;++k) s=process(sideCoeff[k],stSide[k],s);
-        L=m+s; R=m-s;
-        if(stereoEnabled.load()){ for(int k=0;k<kBands;++k){L=process(stereoCoeff[k],stStereoL[k],L); R=process(stereoCoeff[k],stStereoR[k],R);} }
+        // Analyzer/reference matching always sees the raw, pre-correction M/S content, regardless of
+        // solo state - soloing a band to listen to it never affects what the analyzer measures.
+        fftMid[(size_t)fftPos]=m; fftSide[(size_t)fftPos]=s;
+
+        if(soloNow==SoloBand::Mid){
+            // FIX (real solo): play the raw mid content only, on both channels, so it can be
+            // auditioned before any EQ correction is applied.
+            L=m; R=m;
+        } else if(soloNow==SoloBand::Side){
+            // FIX (real solo): play the raw side (difference) content only.
+            L=s; R=-s;
+        } else {
+            // Normal path (also used when "STEREO" is selected, since that just means "no band is
+            // isolated - hear the full corrected mix").
+            if(dirty.exchange(false)) rebuildCoefficients();
+            for(int k=0;k<kBands;++k) m=process(midCoeff[k],stMid[k],m);
+            for(int k=0;k<kBands;++k) s=process(sideCoeff[k],stSide[k],s);
+            L=m+s; R=m-s;
+            for(int k=0;k<kBands;++k){L=process(stereoCoeff[k],stStereoL[k],L); R=process(stereoCoeff[k],stStereoR[k],R);}
+            if(widthPost) applyWidth(L,R);
+        }
         b.setSample(0,i,L); if(ch>1)b.setSample(1,i,R); else b.setSample(1,i,R); outSum += .5f*(L*L+R*R);
-        fftMid[(size_t)fftPos]=m; fftSide[(size_t)fftPos]=s; if(++fftPos>=kFFTSize){fftPos=0; analyzeAndUpdate();}
+        if(++fftPos>=kFFTSize){fftPos=0; analyzeAndUpdate();}
     }
     inputRmsDb.store(juce::Decibels::gainToDecibels(std::sqrt(inSum/juce::jmax(1,n))+1e-9f)); outputRmsDb.store(juce::Decibels::gainToDecibels(std::sqrt(outSum/juce::jmax(1,n))+1e-9f));
 }
 
 void PQAudioProcessor::analyzeAndUpdate(){
     std::array<float,kFFTSize*2> buf{};
+    // FIX (graphics quality): the analyzer used to look up a single nearest FFT bin per on-screen
+    // point. That made low frequencies look like a staircase (many points sharing one wide bin
+    // range) and high frequencies look noisy/spiky (many bins collapsed onto one point by picking
+    // just one of them at random). Averaging power across the bin range each point actually
+    // represents fixes both, without losing frequency accuracy.
+    auto hzAt=[&](float t){ return std::exp(std::log(20.f)+t*(std::log(20000.f)-std::log(20.f))); };
     auto read=[&](const std::array<float,kFFTSize>& src,std::array<float,kBins>& dst){
         for(int i=0;i<kFFTSize;++i)buf[2*i]=src[i]; window.multiplyWithWindowingTable(buf.data(),kFFTSize); fft.performRealOnlyForwardTransform(buf.data());
-        for(int i=0;i<kBins;++i){float t=i/float(kBins-1),hz=std::exp(std::log(20.f)+t*(std::log(20000.f)-std::log(20.f)));int bin=juce::jlimit(1,kFFTSize/2-1,(int)std::round(hz*kFFTSize/sr));float re=buf[2*bin],im=buf[2*bin+1];dst[(size_t)i]=juce::Decibels::gainToDecibels(std::sqrt(re*re+im*im)/(float)kFFTSize+1e-9f);}
+        for(int i=0;i<kBins;++i){
+            float t=i/float(kBins-1);
+            float tLo = (i==0) ? t : 0.5f*(t + (i-1)/float(kBins-1));
+            float tHi = (i==kBins-1) ? t : 0.5f*(t + (i+1)/float(kBins-1));
+            int binLo = juce::jlimit(1,kFFTSize/2-1,(int)std::floor(hzAt(tLo)*kFFTSize/sr));
+            int binHi = juce::jlimit(binLo,kFFTSize/2-1,(int)std::ceil(hzAt(tHi)*kFFTSize/sr));
+            double sumPow=0.0; int count=0;
+            for(int bIdx=binLo;bIdx<=binHi;++bIdx){ float re=buf[2*bIdx],im=buf[2*bIdx+1]; sumPow += (double)(re*re+im*im); ++count; }
+            float mag = count>0 ? (float)std::sqrt(sumPow/count) : 0.f;
+            dst[(size_t)i]=juce::Decibels::gainToDecibels(mag/(float)kFFTSize+1e-9f);
+        }
     };
     read(fftMid,liveMid); read(fftSide,liveSide);
-    for(int i=0;i<kBins;++i){float m=juce::Decibels::decibelsToGain(liveMid[i]),s=juce::Decibels::decibelsToGain(liveSide[i]); liveStereo[i]=juce::Decibels::gainToDecibels(std::sqrt(m*m+s*s)+1e-9f); stereoCurve[i].store(juce::jlimit(kFloor,6.f,liveStereo[i])); midCurve[i].store(juce::jlimit(kFloor,6.f,liveMid[i])); sideCurve[i].store(juce::jlimit(kFloor,6.f,liveSide[i])); }
+    // FIX (graphics quality): light temporal smoothing (one-pole glide toward the new value) so the
+    // curve eases between analysis frames instead of snapping - the previous instant-replace read as
+    // cheap/jumpy motion.
+    const float smoothing=0.35f;
+    auto smoothStore=[&](std::array<std::atomic<float>,kBins>& curve,float newVal,int i){
+        float prev=curve[(size_t)i].load(); float target=juce::jlimit(kFloor,6.f,newVal);
+        curve[(size_t)i].store(prev + smoothing*(target-prev));
+    };
+    for(int i=0;i<kBins;++i){
+        float m=juce::Decibels::decibelsToGain(liveMid[i]),s=juce::Decibels::decibelsToGain(liveSide[i]);
+        liveStereo[i]=juce::Decibels::gainToDecibels(std::sqrt(m*m+s*s)+1e-9f);
+        smoothStore(stereoCurve,liveStereo[i],i); smoothStore(midCurve,liveMid[i],i); smoothStore(sideCurve,liveSide[i],i);
+    }
     if(hasReference.load()){buildCorrection(corrMid,refMid,liveMid,midMatch.load());buildCorrection(corrSide,refSide,liveSide,sideMatch.load());buildCorrection(corrStereo,refStereo,liveStereo,stereoMatch.load());dirty.store(true);}
 }
 
@@ -95,29 +151,29 @@ bool PQAudioProcessor::loadReference(const juce::File& f){
 
 void PQAudioProcessor::getStateInformation(juce::MemoryBlock& d){
     juce::MemoryOutputStream o(d,true);
-    o.writeInt(0x50515333); // FIX: version bumped (was 0x50515332) because enabled-flags were added below
+    o.writeInt(0x50515335); // FIX: version bumped (was 0x50515334) to add the width pre/post-EQ flag
     for(float v:{stereoMatch.load(),midMatch.load(),sideMatch.load(),lowHz.load(),highHz.load(),maxCorrectionDb.load(),smoothingOctaves.load(),widthAmount.load(),widthDepth.load()})o.writeFloat(v);
     o.writeInt((int)widthMode.load());
-    // FIX (bug #3): per-band enable/disable is now part of the saved state. Previously these three
-    // flags were never written, so every reload/reopen silently reset all three bands back to "on".
-    o.writeBool(stereoEnabled.load()); o.writeBool(midEnabled.load()); o.writeBool(sideEnabled.load());
+    o.writeBool(widthPostEq.load());
     o.writeBool(hasReference.load());
     if(hasReference.load()) for(auto* a:{&refStereo,&refMid,&refSide}) for(int i=0;i<kBins;++i) o.writeFloat((*a)[(size_t)i].load());
 }
 void PQAudioProcessor::setStateInformation(const void* data,int size){
     juce::MemoryInputStream in(data,(size_t)size,false);
     auto magic=in.readInt();
-    if(magic!=0x50515333 && magic!=0x50515332) return; // unknown/corrupt state: ignore rather than risk misreading garbage into the DSP
-    bool legacy = (magic==0x50515332);
+    if(magic!=0x50515335 && magic!=0x50515334 && magic!=0x50515333 && magic!=0x50515332) return; // unknown/corrupt state: ignore rather than risk misreading garbage into the DSP
+    bool hasWidthStage = (magic==0x50515335);
+    bool hadOldEnableFlags = (magic==0x50515333); // v3 wrote 3 bools we no longer use; skip them so the rest of the stream stays aligned
     stereoMatch.store(in.readFloat());midMatch.store(in.readFloat());sideMatch.store(in.readFloat());
     lowHz.store(in.readFloat());highHz.store(in.readFloat());maxCorrectionDb.store(in.readFloat());smoothingOctaves.store(in.readFloat());
     widthAmount.store(in.readFloat());widthDepth.store(in.readFloat());
     widthMode.store((WidthMode)in.readInt());
-    if(!legacy){ stereoEnabled.store(in.readBool()); midEnabled.store(in.readBool()); sideEnabled.store(in.readBool()); }
-    else { stereoEnabled.store(true); midEnabled.store(true); sideEnabled.store(true); } // old projects saved before this fix: default to all-on, matching old behaviour
+    if(hasWidthStage) widthPostEq.store(in.readBool()); else widthPostEq.store(false);
+    if(hadOldEnableFlags){ in.readBool(); in.readBool(); in.readBool(); }
     bool hr=in.readBool();
     if(hr) for(auto* a:{&refStereo,&refMid,&refSide}) for(int i=0;i<kBins;++i) (*a)[(size_t)i].store(in.readFloat());
     hasReference.store(hr);
+    solo.store(SoloBand::None);
     applyMatch();
 }
 juce::AudioProcessorEditor* PQAudioProcessor::createEditor(){return new PQAudioProcessorEditor(*this);}
