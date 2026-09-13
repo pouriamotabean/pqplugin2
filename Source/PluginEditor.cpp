@@ -82,21 +82,21 @@ PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcesso
  // "hears" the widened signal) or after it (POST, widening is the very last step on the output).
  widthStage.onClick=[this]{ bool now=!p.widthPostEq.load(); p.widthPostEq.store(now); widthStage.setButtonText(now?"POST":"PRE"); };
 
- // FIX (real solo): clicking a band button now solos it (mutually exclusive) - it mutes the other
- // band and lets you hear/see that one in isolation, pre-correction. Clicking the active one again
- // (or clicking STEREO) returns to the normal full, corrected mix.
- stereo.onClick=[this]{p.solo.store(p.solo.load()==PQAudioProcessor::SoloBand::Stereo?PQAudioProcessor::SoloBand::None:PQAudioProcessor::SoloBand::Stereo); refreshBandButtons();};
- mid.onClick=[this]{p.solo.store(p.solo.load()==PQAudioProcessor::SoloBand::Mid?PQAudioProcessor::SoloBand::None:PQAudioProcessor::SoloBand::Mid); refreshBandButtons();};
- side.onClick=[this]{p.solo.store(p.solo.load()==PQAudioProcessor::SoloBand::Side?PQAudioProcessor::SoloBand::None:PQAudioProcessor::SoloBand::Side); refreshBandButtons();};
+ // FIX (item 4): STEREO/MID/SIDE are now independent on/off toggles instead of a mutually-exclusive
+ // solo, so any combination - one alone, two together, or all three - can be shown on the analyzer
+ // and heard in the output. See PQAudioProcessor::stereoOn/midOn/sideOn.
+ stereo.onClick=[this]{p.stereoOn.store(!p.stereoOn.load()); refreshBandButtons();};
+ mid.onClick=[this]{p.midOn.store(!p.midOn.load()); refreshBandButtons();};
+ side.onClick=[this]{p.sideOn.store(!p.sideOn.load()); refreshBandButtons();};
  refreshBandButtons();
 
- // FIX (item 3): one show/hide checkbox per manual-EQ target, tinted to match that target's node/
- // curve colour so it's obvious at a glance which switch controls which line. Purely a display
- // filter - repaint() is all that's needed, the underlying bands and audio are untouched.
+ // FIX (item 2/3): one show/hide dot per manual-EQ target, tinted to match that target's node/curve
+ // colour so it's obvious at a glance which switch controls which line. Purely a display filter -
+ // repaint() is all that's needed, the underlying bands and audio are untouched.
  for(auto* t:{&stereoEqToggle,&midEqToggle,&sideEqToggle}){ addAndMakeVisible(*t); t->setToggleState(true,juce::dontSendNotification); t->onClick=[this]{repaint();}; }
- stereoEqToggle.setColour(juce::ToggleButton::tickColourId, manualStereoColour());
- midEqToggle.setColour(juce::ToggleButton::tickColourId, manualMidColour());
- sideEqToggle.setColour(juce::ToggleButton::tickColourId, manualSideColour());
+ stereoEqToggle.setDotColour(manualStereoColour());
+ midEqToggle.setDotColour(manualMidColour());
+ sideEqToggle.setDotColour(manualSideColour());
 
  auto bind=[this](juce::Slider&s,std::atomic<float>&v){setupSlider(s,0,100,.1);s.setValue(v.load()*100);s.onValueChange=[this,&s,&v]{v.store((float)s.getValue()/100.f);p.applyMatch();};};bind(sAmt,p.stereoMatch);bind(mAmt,p.midMatch);bind(siAmt,p.sideMatch);
  setupSlider(low,20,20000,1);setupSlider(high,20,20000,1);setupSlider(width,0,100,.1);setupSlider(depth,0,200,1);
@@ -152,9 +152,8 @@ void PQAudioProcessorEditor::syncControlsFromProcessor(){
 }
 
 void PQAudioProcessorEditor::refreshBandButtons(){
- auto s=p.solo.load(); bool none = s==PQAudioProcessor::SoloBand::None;
  auto style=[](juce::TextButton&b,juce::Colour c,bool on){ b.setColour(juce::TextButton::textColourOffId, on?c:dim()); b.setColour(juce::TextButton::textColourOnId, on?c:dim()); };
- style(stereo,white(),none||s==PQAudioProcessor::SoloBand::Stereo); style(mid,yellow(),none||s==PQAudioProcessor::SoloBand::Mid); style(side,blue(),none||s==PQAudioProcessor::SoloBand::Side);
+ style(stereo,white(),p.stereoOn.load()); style(mid,yellow(),p.midOn.load()); style(side,blue(),p.sideOn.load());
 }
 
 void PQAudioProcessorEditor::setupButton(juce::TextButton&b,juce::Colour c){addAndMakeVisible(b);b.setColour(juce::TextButton::buttonColourId,panel());b.setColour(juce::TextButton::buttonOnColourId,grid());b.setColour(juce::TextButton::textColourOffId,c);b.setColour(juce::TextButton::textColourOnId,c);}
@@ -426,14 +425,30 @@ bool PQAudioProcessorEditor::keyPressed(const juce::KeyPress& k){
     return false;
 }
 void PQAudioProcessorEditor::showBandTypeMenu(int bandIndex, juce::Point<int> screenPos){
-    using T=PQAudioProcessor::ManualType;
+    using T=PQAudioProcessor::ManualType; using MT=PQAudioProcessor::ManualTarget;
     juce::PopupMenu m; m.setLookAndFeel(&bigMenuLnf); // FIX (item 5): 3x larger menu text
     m.addItem(1,"Bell"); m.addItem(2,"Low Shelf"); m.addItem(3,"High Shelf"); m.addItem(4,"Low Cut"); m.addItem(5,"High Cut"); m.addItem(6,"Notch");
+    m.addSeparator();
+    // FIX (item 1, actually wired up this time): PQAudioProcessor::setManualBandTarget() already
+    // existed but no menu ever called it, so a node's target (Stereo/Mid/Side) was fixed forever at
+    // creation - the only way to a get a Mid/Side node was to build it that way from scratch via the
+    // empty-space "Add Band" menu. This submenu lets an *existing* node be moved between targets at
+    // any time; a checkmark shows which target it's on now.
+    MT currentTarget = p.manualBands[(size_t)bandIndex].target.load();
+    juce::PopupMenu moveMenu; moveMenu.setLookAndFeel(&bigMenuLnf);
+    moveMenu.addItem(101,"Stereo",true,currentTarget==MT::Stereo);
+    moveMenu.addItem(102,"Mid",   true,currentTarget==MT::Mid);
+    moveMenu.addItem(103,"Side",  true,currentTarget==MT::Side);
+    m.addSubMenu("Move To",moveMenu);
     m.addSeparator(); m.addItem(7,"Delete Band");
     juce::PopupMenu::Options opts; opts = opts.withTargetScreenArea(juce::Rectangle<int>(screenPos,screenPos));
     m.showMenuAsync(opts, [this,bandIndex](int result){
         if(result==0) return;
         if(result==7){ p.removeManualBand(bandIndex); if(selectedBand==bandIndex) selectedBand=-1; repaint(); return; }
+        if(result>=101 && result<=103){
+            static const MT targets[]={MT::Stereo,MT::Mid,MT::Side};
+            p.setManualBandTarget(bandIndex, targets[result-101]); repaint(); return;
+        }
         static const T types[]={T::Bell,T::LowShelf,T::HighShelf,T::LowCut,T::HighCut,T::Notch};
         p.setManualBandType(bandIndex, types[result-1]); repaint();
     });
@@ -483,28 +498,20 @@ void PQAudioProcessorEditor::paint(juce::Graphics&g){g.fillAll(bg());auto a=getL
  // nothing can ever visually escape it, regardless of the underlying data.
  juce::Path chartClip; chartClip.addRoundedRectangle(chart,14.f);
  g.saveState(); g.reduceClipRegion(chartClip);
- // FIX (solo wasn't "clean"): soloing used to dim the other bands to 15% instead of hiding them, so
- // their live curve *and* their reference curve (drawn unconditionally, below) both still bled
- // through - which is why a soloed STEREO line never looked fully white. Non-soloed bands (both
- // their live curve and their reference trace) are now skipped entirely while a solo is active.
- auto s=p.solo.load(); bool none=s==PQAudioProcessor::SoloBand::None;
- auto visible=[&](PQAudioProcessor::SoloBand b){ return none||s==b; };
+ // FIX (item 4): each of Stereo/Mid/Side is now drawn purely from its own independent on/off flag,
+ // so any combination is visible at once - not just whichever single one used to be "soloed".
  if(p.hasReference.load()){
-     if(visible(PQAudioProcessor::SoloBand::Stereo)) drawRef(g,chart,p.refStereo,white());
-     if(visible(PQAudioProcessor::SoloBand::Mid)) drawRef(g,chart,p.refMid,yellow());
-     if(visible(PQAudioProcessor::SoloBand::Side)) drawRef(g,chart,p.refSide,blue());
+     if(p.stereoOn.load()) drawRef(g,chart,p.refStereo,white());
+     if(p.midOn.load()) drawRef(g,chart,p.refMid,yellow());
+     if(p.sideOn.load()) drawRef(g,chart,p.refSide,blue());
  }
- if(visible(PQAudioProcessor::SoloBand::Stereo)) drawCurve(g,chart,p.stereoCurve,white());
- if(visible(PQAudioProcessor::SoloBand::Mid)) drawCurve(g,chart,p.midCurve,yellow());
- if(visible(PQAudioProcessor::SoloBand::Side)) drawCurve(g,chart,p.sideCurve,blue());
+ if(p.stereoOn.load()) drawCurve(g,chart,p.stereoCurve,white());
+ if(p.midOn.load()) drawCurve(g,chart,p.midCurve,yellow());
+ if(p.sideOn.load()) drawCurve(g,chart,p.sideCurve,blue());
  drawManualEq(g);
  g.restoreState();
  label(g,"20 Hz",{chart.getX(),chart.getBottom()-18,60,18},muted());label(g,"1 kHz",{chart.getCentreX()-25,chart.getBottom()-18,50,18},muted());label(g,"20 kHz",{chart.getRight()-60,chart.getBottom()-18,60,18},muted());
  label(g,"CLICK: ADD BAND   RIGHT-CLICK: TYPE+TARGET/DELETE   DRAG: FREQ+GAIN   SCROLL: Q   DEL: REMOVE SELECTED",{chart.getX(),chart.getY()-16,700,14},muted());
- // FIX (item 3): tiny labels for the three show/hide checkboxes, coloured to match their target.
- label(g,"STEREO",{stereo.getRight()-90.f,54.f,80,12},manualStereoColour());
- label(g,"MID",{mid.getRight()-90.f,54.f,80,12},manualMidColour());
- label(g,"SIDE",{side.getRight()-90.f,54.f,80,12},manualSideColour());
  g.setColour(panel());g.fillRoundedRectangle(24,chart.getBottom()+32,a.getWidth()-48,a.getHeight()-chart.getBottom()-56,14);
  label(g,"MATCH AMOUNT",{42,chart.getBottom()+47,150,18},muted());label(g,"FREQUENCY RANGE",{700,chart.getBottom()+47,180,18},muted());label(g,"MONO → STEREO",{42,chart.getBottom()+153,180,18},muted());
  int y=(int)chart.getBottom()+70;
@@ -513,14 +520,17 @@ void PQAudioProcessorEditor::paint(juce::Graphics&g){g.fillAll(bg());auto a=getL
  label(g,"MODE",{210,(float)y+100,100,18},muted()); label(g,"WIDTH AMT",{410,(float)y+100,100,18},muted()); label(g,"STAGE",{210,(float)y+132,100,18},muted()); label(g,"DEPTH %",{410,(float)y+132,100,18},muted());
  // Input/output level meters (each doubling as a trim fader - see setupVerticalTrim) plus the
  // MATCH GAIN button sitting between them, replacing the old Max dB / Smoothing sliders here.
+ // FIX (item 3): the bar/peak-line alone wasn't enough to read an exact value at a glance, so the
+ // live level now also prints as a small number above each meter (next to IN/OUT), in addition to
+ // the trim value already printed below - both readouts sit outside the bar, as plain text.
  g.setFont(juce::FontOptions(9)); g.setColour(muted());
- g.drawText("IN",inputMeterArea.withY(inputMeterArea.getY()-16).withHeight(14),juce::Justification::centred);
- g.drawText("OUT",outputMeterArea.withY(outputMeterArea.getY()-16).withHeight(14),juce::Justification::centred);
+ g.drawText("IN  "+juce::String(p.inputRmsDb.load(),1)+"dB",inputMeterArea.withY(inputMeterArea.getY()-16).withHeight(14),juce::Justification::centred);
+ g.drawText("OUT  "+juce::String(p.outputRmsDb.load(),1)+"dB",outputMeterArea.withY(outputMeterArea.getY()-16).withHeight(14),juce::Justification::centred);
  drawVerticalMeter(g,inputMeterArea,p.inputRmsDb.load(),p.inputPeakDb.load(),white());
  drawVerticalMeter(g,outputMeterArea,p.outputRmsDb.load(),p.outputPeakDb.load(),blue());
  g.setColour(muted()); g.setFont(juce::FontOptions(8));
- g.drawText(juce::String(p.inputTrimDb.load(),1)+"dB",inputMeterArea.withY(inputMeterArea.getBottom()+2).withHeight(12),juce::Justification::centred);
- g.drawText(juce::String(p.outputTrimDb.load(),1)+"dB",outputMeterArea.withY(outputMeterArea.getBottom()+2).withHeight(12),juce::Justification::centred);
+ g.drawText("TRIM "+juce::String(p.inputTrimDb.load(),1)+"dB",inputMeterArea.withY(inputMeterArea.getBottom()+2).withHeight(12),juce::Justification::centred);
+ g.drawText("TRIM "+juce::String(p.outputTrimDb.load(),1)+"dB",outputMeterArea.withY(outputMeterArea.getBottom()+2).withHeight(12),juce::Justification::centred);
  // FIX (item 7): "GAIN MATCHED"/etc used to float in the corner with nothing to explain it. It's a
  // shared status line for CAPTURE/APPLY/CLEAR/SAVE/LOAD/MATCH GAIN feedback, so give it a caption
  // instead of removing the (still useful) shared line.
@@ -529,10 +539,20 @@ void PQAudioProcessorEditor::paint(juce::Graphics&g){g.fillAll(bg());auto a=getL
 void PQAudioProcessorEditor::resized(){auto a=getLocalBounds();
  // FIX (item 6): PRESETS sits left of STEREO/MID/SIDE at the top, matching where a "professional"
  // plugin's preset browser button usually lives.
+ // FIX (item 2/3): the three show/hide dots now sit inline on the header row, just left of PRESETS,
+ // instead of stacked directly under STEREO/MID/SIDE where they were easy to miss-click against the
+ // button above. No text needed - colour (white/yellow/blue) says which target each one is.
+ {
+     constexpr int dot=18, gap=8, groupW=dot*3+gap*2;
+     int presetsX=a.getRight()-403;
+     int groupLeft=presetsX-12-groupW;
+     int dotY=18+(36-dot)/2;
+     stereoEqToggle.setBounds(groupLeft,dotY,dot,dot);
+     midEqToggle.setBounds(groupLeft+dot+gap,dotY,dot,dot);
+     sideEqToggle.setBounds(groupLeft+2*(dot+gap),dotY,dot,dot);
+ }
  presetsBtn.setBounds(a.getRight()-403,18,90,36);
  stereo.setBounds(a.getRight()-305,18,90,36);mid.setBounds(a.getRight()-207,18,90,36);side.setBounds(a.getRight()-109,18,90,36);
- // FIX (item 3): small show/hide checkboxes just under each STEREO/MID/SIDE button.
- stereoEqToggle.setBounds(a.getRight()-305,54,90,16); midEqToggle.setBounds(a.getRight()-207,54,90,16); sideEqToggle.setBounds(a.getRight()-109,54,90,16);
  auto chart=a.reduced(24,72).withHeight(a.getHeight()*.48f);int y=chart.getBottom()+70;sAmt.setBounds(145,y,470,22);mAmt.setBounds(145,y+32,470,22);siAmt.setBounds(145,y+64,470,22);low.setBounds(700,y+18,185,22);high.setBounds(900,y+18,185,22);
  inputMeterArea={700.f,(float)(y+62),70.f,108.f}; outputMeterArea={900.f,(float)(y+62),70.f,108.f};
  inputTrim.setBounds(inputMeterArea.toNearestInt()); outputTrim.setBounds(outputMeterArea.toNearestInt());
