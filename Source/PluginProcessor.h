@@ -78,12 +78,14 @@ public:
     // Whether the mono-widener runs before the EQ correction (so the analyzer/match "sees" the
     // widened signal) or after it (so widening is the last thing applied to the final output).
     std::atomic<bool> widthPostEq{false};
-    // FIX: replaced per-band "apply correction" toggles with a real audition Solo (mutually
-    // exclusive). Match-amount sliders already control how much correction each band gets, so a
-    // separate enable/disable was redundant - what was actually missing was the ability to hear one
-    // band in isolation before any correction is applied.
-    enum class SoloBand { None, Stereo, Mid, Side };
-    std::atomic<SoloBand> solo{SoloBand::None};
+    // FIX (item 4): the old Solo was a single mutually-exclusive choice (None/Stereo/Mid/Side), so
+    // you could only ever hear/see one band in isolation - "Mid + Side together" or "all three" were
+    // impossible. These are now three independent on/off flags: any combination can be shown on the
+    // analyzer and heard in the output. Mid/Side default "on" = normal corrected content; switched
+    // "off" that leg's raw+corrected contribution is muted out of the mix entirely, so it can be
+    // isolated. Stereo has no raw content of its own (it's the final stage applied to the already-
+    // recombined L/R) - "on" runs that final EQ/width stage as usual, "off" bypasses it.
+    std::atomic<bool> stereoOn{true}, midOn{true}, sideOn{true};
     std::atomic<bool> hasReference{false};
     std::array<std::atomic<float>,kBins> stereoCurve{},midCurve{},sideCurve{};
     // FIX (crash-risk #2): reference arrays are now atomic (were plain float[] before) because the
