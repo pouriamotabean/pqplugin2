@@ -4,6 +4,10 @@
 
 class PQAudioProcessorEditor:public juce::AudioProcessorEditor,private juce::Timer{
 public: explicit PQAudioProcessorEditor(PQAudioProcessor&); ~PQAudioProcessorEditor() override; void paint(juce::Graphics&)override; void resized()override;
+ // Manual EQ (Pro-Q style) is mouse-only - no sliders/knobs at all - so it lives on the chart itself.
+ void mouseDown(const juce::MouseEvent&) override; void mouseDrag(const juce::MouseEvent&) override;
+ void mouseUp(const juce::MouseEvent&) override; void mouseDoubleClick(const juce::MouseEvent&) override;
+ void mouseWheelMove(const juce::MouseEvent&,const juce::MouseWheelDetails&) override;
 private:
  PQAudioProcessor& p; juce::TextButton stereo{"STEREO"},mid{"MID"},side{"SIDE"},capture{"CAPTURE"},apply{"APPLY"},save{"SAVE"},load{"LOAD"},clear{"CLEAR"},widthStage{"PRE"};
  juce::Slider sAmt,mAmt,siAmt,low,high,maxDb,smooth,width,depth; juce::ComboBox mode; juce::Label status;
@@ -14,5 +18,17 @@ private:
  void refreshBandButtons();
  void drawCurve(juce::Graphics&,juce::Rectangle<float>,const std::array<std::atomic<float>,PQAudioProcessor::kBins>&,juce::Colour); void drawRef(juce::Graphics&,juce::Rectangle<float>,const std::array<std::atomic<float>,PQAudioProcessor::kBins>&,juce::Colour);
  void drawRangeMask(juce::Graphics&,juce::Rectangle<float>);
+
+ // ---- Manual EQ chart geometry + interaction --------------------------------------------
+ juce::Rectangle<float> chartArea; // recomputed every paint(); mouse handlers reuse it
+ int draggingBand=-1; bool draggedPastThreshold=false; juce::Point<float> mouseDownPos;
+ static constexpr float kManualGainRangeDb=24.f; // the manual EQ node chart shows +/- this many dB
+ float xToFreq(float x) const; float freqToX(float hz) const;
+ float yToGainDb(float y) const; float gainDbToY(float gainDb) const;
+ int findBandNear(juce::Point<float> pos) const; // returns index within grab radius, or -1
+ void drawManualEq(juce::Graphics&);
+ void showBandTypeMenu(int bandIndex, juce::Point<int> screenPos);
+ void showAddBandMenu(juce::Point<float> chartPos, juce::Point<int> screenPos);
+ static juce::String manualTypeLabel(PQAudioProcessor::ManualType);
  JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PQAudioProcessorEditor)
 };
