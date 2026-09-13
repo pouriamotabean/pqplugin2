@@ -26,10 +26,14 @@ public:
     // This sits on top of the automatic match-EQ, on the final stereo output. It has no knobs:
     // every band is created, moved, reshaped and deleted purely with the mouse in the editor.
     enum class ManualType { Bell, LowShelf, HighShelf, LowCut, HighCut, Notch };
+    // Which signal a manual band is inserted on: Stereo = final L/R (post width, as before),
+    // Mid/Side = the corresponding M/S leg, before it's folded back into L/R. See processBlock().
+    enum class ManualTarget { Stereo, Mid, Side };
     static constexpr int kMaxManualBands = 16;
     struct ManualBand {
         std::atomic<bool> active{false};
         std::atomic<ManualType> type{ManualType::Bell};
+        std::atomic<ManualTarget> target{ManualTarget::Stereo};
         std::atomic<float> freq{1000.f};
         std::atomic<float> gainDb{0.f};
         std::atomic<float> q{0.7f};
@@ -38,12 +42,17 @@ public:
     std::atomic<bool> manualDirty{true};
     // Editor calls these instead of touching manualBands directly, so the processor can flag
     // its coefficients dirty and pick the fix an empty slot for a new band.
-    int addManualBand(ManualType type,float freq,float gainDb,float q);
+    int addManualBand(ManualType type,float freq,float gainDb,float q,ManualTarget target=ManualTarget::Stereo);
     void removeManualBand(int index);
     void setManualBand(int index,ManualType type,float freq,float gainDb,float q);
     void setManualBandType(int index,ManualType type);
     void setManualBandFreqGain(int index,float freq,float gainDb);
     void setManualBandQ(int index,float q);
+    // Changing a band's target mid-playback moves it between completely separate filter states
+    // (L/R vs mono Mid vs mono Side - see manualStateL/R/Mid/Side below), so its old state is reset
+    // to silence at the moment of the switch rather than carrying stale history into the new path,
+    // which is what would otherwise cause a click/pop.
+    void setManualBandTarget(int index,ManualTarget target);
 
     PQAudioProcessor(); ~PQAudioProcessor() override = default;
     void prepareToPlay(double,int) override; void releaseResources() override {}
@@ -85,6 +94,10 @@ public:
     std::array<std::atomic<float>,kBins> refStereo{},refMid{},refSide{};
     std::array<float,kBands> bandHz{};
     std::atomic<float> inputRmsDb{-90}, outputRmsDb{-90};
+    // Peak-hold meters (instantaneous peak, held then released at a slow fixed dB/sec rate - see
+    // processBlock). Separate from the RMS meters above: matchGain() below uses these, the RMS pair
+    // is only for the meter bar's average-level fill.
+    std::atomic<float> inputPeakDb{-90}, outputPeakDb{-90};
     std::atomic<uint64_t> generation{0};
 
 private:
@@ -105,9 +118,11 @@ private:
     float prevMono=0;
     std::atomic<bool> dirty{true};
 
-    // Manual EQ DSP: one coefficient set + one stereo-linked state pair per possible band.
+    // Manual EQ DSP: one coefficient set per possible band, plus one state per signal path it could
+    // be routed to. Only the state matching the band's current target is ever advanced in
+    // processBlock(); the others sit idle so switching target doesn't mix histories together.
     std::array<Coeff,kMaxManualBands> manualCoeff{};
-    std::array<State,kMaxManualBands> manualStateL{},manualStateR{};
+    std::array<State,kMaxManualBands> manualStateL{},manualStateR{},manualStateMid{},manualStateSide{};
     void rebuildManualCoefficients();
     static Coeff makeManualCoeff(ManualType,float freqHz,float gainDb,float q,double sampleRate);
 
