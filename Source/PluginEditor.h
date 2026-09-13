@@ -9,15 +9,21 @@ public: explicit PQAudioProcessorEditor(PQAudioProcessor&); ~PQAudioProcessorEdi
  void mouseUp(const juce::MouseEvent&) override; void mouseDoubleClick(const juce::MouseEvent&) override;
  void mouseWheelMove(const juce::MouseEvent&,const juce::MouseWheelDetails&) override;
 private:
- PQAudioProcessor& p; juce::TextButton stereo{"STEREO"},mid{"MID"},side{"SIDE"},capture{"CAPTURE"},apply{"APPLY"},save{"SAVE"},load{"LOAD"},clear{"CLEAR"},widthStage{"PRE"};
- juce::Slider sAmt,mAmt,siAmt,low,high,maxDb,smooth,width,depth; juce::ComboBox mode; juce::Label status;
+ PQAudioProcessor& p; juce::TextButton stereo{"STEREO"},mid{"MID"},side{"SIDE"},capture{"CAPTURE"},apply{"APPLY"},save{"SAVE"},load{"LOAD"},clear{"CLEAR"},widthStage{"PRE"},matchGainBtn{"MATCH GAIN"};
+ juce::Slider sAmt,mAmt,siAmt,low,high,width,depth;
+ // Max dB / Smoothing are no longer exposed as sliders (kept fixed at sane defaults in the
+ // processor); this screen space now holds the input/output level meters + trim faders instead.
+ juce::Slider inputTrim,outputTrim; juce::Rectangle<float> inputMeterArea,outputMeterArea;
+ juce::ComboBox mode; juce::Label status;
  // FIX: FileChooser must stay alive for the duration of the async browse, so it lives here as a
  // member rather than a local variable that would be destroyed the instant onClick() returns.
  std::unique_ptr<juce::FileChooser> chooser;
- void timerCallback()override{repaint();} void setupButton(juce::TextButton&,juce::Colour); void setupSlider(juce::Slider&,double,double,double); void label(juce::Graphics&,juce::String,juce::Rectangle<float>,juce::Colour);
+ void timerCallback()override{repaint();} void setupButton(juce::TextButton&,juce::Colour); void setupSlider(juce::Slider&,double,double,double); void setupVerticalTrim(juce::Slider&); void label(juce::Graphics&,juce::String,juce::Rectangle<float>,juce::Colour);
  void refreshBandButtons();
  void drawCurve(juce::Graphics&,juce::Rectangle<float>,const std::array<std::atomic<float>,PQAudioProcessor::kBins>&,juce::Colour); void drawRef(juce::Graphics&,juce::Rectangle<float>,const std::array<std::atomic<float>,PQAudioProcessor::kBins>&,juce::Colour);
  void drawRangeMask(juce::Graphics&,juce::Rectangle<float>);
+ // Minimal vertical bar meter (input/output level), drawn behind the trim slider of the same name.
+ void drawVerticalMeter(juce::Graphics&,juce::Rectangle<float>,float levelDb,juce::Colour);
 
  // ---- Manual EQ chart geometry + interaction --------------------------------------------
  juce::Rectangle<float> chartArea; // recomputed every paint(); mouse handlers reuse it
