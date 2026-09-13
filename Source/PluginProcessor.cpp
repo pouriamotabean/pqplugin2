@@ -42,8 +42,10 @@ void PQAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
     const WidthMode wMode=widthMode.load();
     const bool widthPost=widthPostEq.load();
     if(manualDirty.exchange(false)) rebuildManualCoefficients();
+    const float inGain=juce::Decibels::decibelsToGain(inputTrimDb.load());
+    const float outGain=juce::Decibels::decibelsToGain(outputTrimDb.load());
     for(int i=0;i<n;++i){
-        float L=b.getSample(0,i), R=trueMono?L:b.getSample(1,i); inSum += .5f*(L*L+R*R);
+        float L=b.getSample(0,i)*inGain, R=(trueMono?L:b.getSample(1,i)*inGain); inSum += .5f*(L*L+R*R);
 
         // FIX (widener strength): delay times are now musically meaningful (ms, scaled to sample
         // rate) instead of a fixed ~1.3ms 64-sample buffer, so each mode is actually audible.
@@ -60,7 +62,11 @@ void PQAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
                 case WidthMode::Decorrelated: { float d1=tapAt(msToSamples(7.f)), d2=tapAt(msToSamples(23.f)); side=(monoIn-0.5f*(d1+d2))*0.7071f; break; }
             }
             widthWriteIdx=(widthWriteIdx+1)%widthBufSize;
-            side*=widthAmt*widthDep; Lx=monoIn+side; Rx=monoIn-side;
+            // FIX (width still too subtle at max): a flat +35% boost on top of the existing
+            // amount*depth scaling, so turning the sliders all the way up now reads as noticeably
+            // wider than before, instead of the previous max still feeling conservative.
+            constexpr float kWidthBoost=1.35f;
+            side*=widthAmt*widthDep*kWidthBoost; Lx=monoIn+side; Rx=monoIn-side;
         };
 
         if(!widthPost) applyWidth(L,R);
@@ -94,6 +100,7 @@ void PQAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
                 R=process(manualCoeff[(size_t)mb],manualStateR[(size_t)mb],R);
             }
         }
+        L*=outGain; R*=outGain;
         b.setSample(0,i,L); if(ch>1)b.setSample(1,i,R); outSum += .5f*(L*L+R*R);
         // FIX (analyzer latency): advance the circular history buffer every sample, but only run the
         // (expensive) analysis every kHopSize samples - a 75% overlap - instead of once per full
@@ -101,7 +108,16 @@ void PQAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
         fftPos=(fftPos+1)%kFFTSize;
         if(++hopCounter>=kHopSize){hopCounter=0; analyzeAndUpdate();}
     }
-    inputRmsDb.store(juce::Decibels::gainToDecibels(std::sqrt(inSum/juce::jmax(1,n))+1e-9f)); outputRmsDb.store(juce::Decibels::gainToDecibels(std::sqrt(outSum/juce::jmax(1,n))+1e-9f));
+    // FIX (meter/match stability): one-pole smoothing block-to-block, both so the new vertical
+    // meters don't flicker and so matchGain() (below) isn't reading a noisy instantaneous value.
+    {
+        float inDb=juce::Decibels::gainToDecibels(std::sqrt(inSum/juce::jmax(1,n))+1e-9f);
+        float outDb=juce::Decibels::gainToDecibels(std::sqrt(outSum/juce::jmax(1,n))+1e-9f);
+        constexpr float meterSmooth=0.25f;
+        float prevIn=inputRmsDb.load(), prevOut=outputRmsDb.load();
+        inputRmsDb.store(prevIn+meterSmooth*(inDb-prevIn));
+        outputRmsDb.store(prevOut+meterSmooth*(outDb-prevOut));
+    }
 }
 
 void PQAudioProcessor::analyzeAndUpdate(){
@@ -207,6 +223,14 @@ void PQAudioProcessor::captureReference(){for(int i=0;i<kBins;++i){refStereo[i].
 void PQAudioProcessor::clearReference(){hasReference.store(false);corrStereo.fill(0);corrMid.fill(0);corrSide.fill(0);dirty.store(true);}
 void PQAudioProcessor::applyMatch(){if(!hasReference.load())return;buildCorrection(corrMid,refMid,liveMid,midMatch.load());buildCorrection(corrSide,refSide,liveSide,sideMatch.load());buildCorrection(corrStereo,refStereo,liveStereo,stereoMatch.load());dirty.store(true);}
 
+// "MATCH GAIN": nudges outputTrimDb so the (already-trimmed) output meter reads the same average
+// level as the input meter. Since outputTrimDb is a plain linear gain in dB, and outputRmsDb was
+// measured *with* the current trim already applied, the correction is just the remaining gap.
+void PQAudioProcessor::matchGain(){
+    float diff=inputRmsDb.load()-outputRmsDb.load();
+    outputTrimDb.store(juce::jlimit(-24.f,24.f,outputTrimDb.load()+diff));
+}
+
 bool PQAudioProcessor::saveReference(const juce::File& f){
     juce::MemoryOutputStream o; o.writeInt(0x50525133); o.writeInt(kBins);
     for(auto* a:{&refStereo,&refMid,&refSide}) for(int i=0;i<kBins;++i) o.writeFloat((*a)[(size_t)i].load());
@@ -224,10 +248,11 @@ bool PQAudioProcessor::loadReference(const juce::File& f){
 
 void PQAudioProcessor::getStateInformation(juce::MemoryBlock& d){
     juce::MemoryOutputStream o(d,true);
-    o.writeInt(0x50515336); // FIX: version bumped (was 0x50515335) to add the manual EQ bands
+    o.writeInt(0x50515337); // FIX: version bumped (was 0x50515336) to add input/output trim
     for(float v:{stereoMatch.load(),midMatch.load(),sideMatch.load(),lowHz.load(),highHz.load(),maxCorrectionDb.load(),smoothingOctaves.load(),widthAmount.load(),widthDepth.load()})o.writeFloat(v);
     o.writeInt((int)widthMode.load());
     o.writeBool(widthPostEq.load());
+    o.writeFloat(inputTrimDb.load()); o.writeFloat(outputTrimDb.load());
     o.writeBool(hasReference.load());
     if(hasReference.load()) for(auto* a:{&refStereo,&refMid,&refSide}) for(int i=0;i<kBins;++i) o.writeFloat((*a)[(size_t)i].load());
     o.writeInt(kMaxManualBands);
@@ -236,9 +261,10 @@ void PQAudioProcessor::getStateInformation(juce::MemoryBlock& d){
 void PQAudioProcessor::setStateInformation(const void* data,int size){
     juce::MemoryInputStream in(data,(size_t)size,false);
     auto magic=in.readInt();
-    if(magic!=0x50515336 && magic!=0x50515335 && magic!=0x50515334 && magic!=0x50515333 && magic!=0x50515332) return; // unknown/corrupt state: ignore rather than risk misreading garbage into the DSP
-    bool hasManualEq = (magic==0x50515336);
-    bool hasWidthStage = (magic==0x50515336 || magic==0x50515335);
+    if(magic!=0x50515337 && magic!=0x50515336 && magic!=0x50515335 && magic!=0x50515334 && magic!=0x50515333 && magic!=0x50515332) return; // unknown/corrupt state: ignore rather than risk misreading garbage into the DSP
+    bool hasTrim = (magic==0x50515337);
+    bool hasManualEq = (magic==0x50515337 || magic==0x50515336);
+    bool hasWidthStage = (magic==0x50515337 || magic==0x50515336 || magic==0x50515335);
     bool hadOldEnableFlags = (magic==0x50515333); // v3 wrote 3 bools we no longer use; skip them so the rest of the stream stays aligned
     stereoMatch.store(in.readFloat());midMatch.store(in.readFloat());sideMatch.store(in.readFloat());
     lowHz.store(in.readFloat());highHz.store(in.readFloat());maxCorrectionDb.store(in.readFloat());smoothingOctaves.store(in.readFloat());
@@ -246,6 +272,7 @@ void PQAudioProcessor::setStateInformation(const void* data,int size){
     widthMode.store((WidthMode)in.readInt());
     if(hasWidthStage) widthPostEq.store(in.readBool()); else widthPostEq.store(false);
     if(hadOldEnableFlags){ in.readBool(); in.readBool(); in.readBool(); }
+    if(hasTrim){ inputTrimDb.store(in.readFloat()); outputTrimDb.store(in.readFloat()); } else { inputTrimDb.store(0.f); outputTrimDb.store(0.f); }
     bool hr=in.readBool();
     if(hr) for(auto* a:{&refStereo,&refMid,&refSide}) for(int i=0;i<kBins;++i) (*a)[(size_t)i].store(in.readFloat());
     hasReference.store(hr);
