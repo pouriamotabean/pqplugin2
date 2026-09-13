@@ -23,7 +23,11 @@ private:
  void drawCurve(juce::Graphics&,juce::Rectangle<float>,const std::array<std::atomic<float>,PQAudioProcessor::kBins>&,juce::Colour); void drawRef(juce::Graphics&,juce::Rectangle<float>,const std::array<std::atomic<float>,PQAudioProcessor::kBins>&,juce::Colour);
  void drawRangeMask(juce::Graphics&,juce::Rectangle<float>);
  // Minimal vertical bar meter (input/output level), drawn behind the trim slider of the same name.
- void drawVerticalMeter(juce::Graphics&,juce::Rectangle<float>,float levelDb,juce::Colour);
+ // peakDb draws the thin peak-hold line (see PQAudioProcessor::inputPeakDb/outputPeakDb).
+ void drawVerticalMeter(juce::Graphics&,juce::Rectangle<float>,float levelDb,float peakDb,juce::Colour);
+ // Horizontal dB gridlines + numeric labels (+20..-20dB) along the chart's left edge, plus the
+ // 100Hz/10kHz frequency labels alongside the existing 20Hz/1kHz/20kHz ones.
+ void drawFreqDbAxis(juce::Graphics&,juce::Rectangle<float>);
 
  // ---- Manual EQ chart geometry + interaction --------------------------------------------
  juce::Rectangle<float> chartArea; // recomputed every paint(); mouse handlers reuse it
