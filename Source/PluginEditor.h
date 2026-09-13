@@ -5,7 +5,7 @@
 class PQAudioProcessorEditor:public juce::AudioProcessorEditor,private juce::Timer{
 public: explicit PQAudioProcessorEditor(PQAudioProcessor&); ~PQAudioProcessorEditor() override; void paint(juce::Graphics&)override; void resized()override;
 private:
- PQAudioProcessor& p; juce::TextButton stereo{"STEREO"},mid{"MID"},side{"SIDE"},capture{"CAPTURE"},apply{"APPLY"},save{"SAVE"},load{"LOAD"},clear{"CLEAR"};
+ PQAudioProcessor& p; juce::TextButton stereo{"STEREO"},mid{"MID"},side{"SIDE"},capture{"CAPTURE"},apply{"APPLY"},save{"SAVE"},load{"LOAD"},clear{"CLEAR"},widthStage{"PRE"};
  juce::Slider sAmt,mAmt,siAmt,low,high,maxDb,smooth,width,depth; juce::ComboBox mode; juce::Label status;
  // FIX: FileChooser must stay alive for the duration of the async browse, so it lives here as a
  // member rather than a local variable that would be destroyed the instant onClick() returns.
