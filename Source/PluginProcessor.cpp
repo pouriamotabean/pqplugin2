@@ -36,7 +36,7 @@ void PQAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
     // signal into L vs 0, i.e. an artificial side signal equal to half the mid content.
     const bool trueMono = getTotalNumInputChannels()<=1;
     float inSum=0,outSum=0;
-    const SoloBand soloNow = solo.load();
+    const bool sOn=stereoOn.load(), mOn=midOn.load(), sdOn=sideOn.load();
     const float widthAmt=juce::jlimit(0.f,1.f,widthAmount.load());
     const float widthDep=widthDepth.load();
     const WidthMode wMode=widthMode.load();
@@ -78,17 +78,11 @@ void PQAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
         // solo state - soloing a band to listen to it never affects what the analyzer measures.
         fftMid[(size_t)fftPos]=m; fftSide[(size_t)fftPos]=s;
 
-        if(soloNow==SoloBand::Mid){
-            // FIX (real solo): play the raw mid content only, on both channels, so it can be
-            // auditioned before any EQ correction is applied.
-            L=m; R=m;
-        } else if(soloNow==SoloBand::Side){
-            // FIX (real solo): play the raw side (difference) content only.
-            L=s; R=-s;
-        } else {
-            // Normal path (also used when "STEREO" is selected, since that just means "no band is
-            // isolated - hear the full corrected mix").
-            if(dirty.exchange(false)) rebuildCoefficients();
+        // FIX (item 4): coefficients must stay current regardless of which legs are on/off (e.g.
+        // Mid muted but Side/Stereo still need up-to-date correction), so this now runs unconditionally
+        // instead of only inside the old "no solo" branch.
+        if(dirty.exchange(false)) rebuildCoefficients();
+        if(mOn){
             for(int k=0;k<kBands;++k) m=process(midCoeff[k],stMid[k],m);
             // Manual bands targeting Mid: applied to the Mid leg only, before it's folded back into
             // L/R, so they never leak into the Side signal.
@@ -96,13 +90,25 @@ void PQAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
                 auto& band=manualBands[(size_t)mbI]; if(!band.active.load()||band.target.load()!=ManualTarget::Mid) continue;
                 m=process(manualCoeff[(size_t)mbI],manualStateMid[(size_t)mbI],m);
             }
+        } else {
+            // Muted: this leg contributes nothing to the recombined L/R, which is what lets Mid and
+            // Side be isolated independently (or together) instead of only as an exclusive solo.
+            m=0.f;
+        }
+        if(sdOn){
             for(int k=0;k<kBands;++k) s=process(sideCoeff[k],stSide[k],s);
             // Manual bands targeting Side: same idea, on the Side leg only.
             for(int mbI=0;mbI<kMaxManualBands;++mbI){
                 auto& band=manualBands[(size_t)mbI]; if(!band.active.load()||band.target.load()!=ManualTarget::Side) continue;
                 s=process(manualCoeff[(size_t)mbI],manualStateSide[(size_t)mbI],s);
             }
-            L=m+s; R=m-s;
+        } else {
+            s=0.f;
+        }
+        L=m+s; R=m-s;
+        if(sOn){
+            // Stereo has no raw content of its own - it's the final stage on the already-recombined
+            // L/R - so "off" bypasses this stage entirely rather than muting the output.
             for(int k=0;k<kBands;++k){L=process(stereoCoeff[k],stStereoL[k],L); R=process(stereoCoeff[k],stStereoR[k],R);}
             if(widthPost) applyWidth(L,R);
             // Manual bands targeting Stereo: the final stage, applied identically (same
@@ -361,7 +367,7 @@ bool PQAudioProcessor::applyStateBlock(const void* data,int size){
         }
     }
     manualDirty.store(true);
-    solo.store(SoloBand::None);
+    stereoOn.store(true); midOn.store(true); sideOn.store(true);
     applyMatch();
     return true;
 }
