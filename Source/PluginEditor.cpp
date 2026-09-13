@@ -84,8 +84,134 @@ void PQAudioProcessorEditor::drawRangeMask(juce::Graphics&g,juce::Rectangle<floa
  g.drawVerticalLine((int)xHi, r.getY(), r.getBottom());
 }
 
-void PQAudioProcessorEditor::paint(juce::Graphics&g){g.fillAll(bg());auto a=getLocalBounds().toFloat();g.setColour(white());g.setFont(juce::FontOptions(29).withStyle("bold"));g.drawText("PQ",28,20,62,32,juce::Justification::left);g.setFont(juce::FontOptions(10));g.setColour(muted());g.drawText("PERFECTION OF MATCH EQ   /   POURIA",91,25,330,22,juce::Justification::left);
+// ---- Manual EQ chart geometry -------------------------------------------------------------
+float PQAudioProcessorEditor::xToFreq(float x) const{ float t=juce::jlimit(0.f,1.f,(x-chartArea.getX())/chartArea.getWidth()); return std::pow(10.f, std::log10(20.f)+t*(std::log10(20000.f)-std::log10(20.f))); }
+float PQAudioProcessorEditor::freqToX(float hz) const{ float t=(std::log10(juce::jlimit(20.f,20000.f,hz))-std::log10(20.f))/(std::log10(20000.f)-std::log10(20.f)); return chartArea.getX()+chartArea.getWidth()*t; }
+float PQAudioProcessorEditor::yToGainDb(float y) const{ float t=juce::jlimit(0.f,1.f,(y-chartArea.getY())/chartArea.getHeight()); return juce::jmap(t,0.f,1.f,kManualGainRangeDb,-kManualGainRangeDb); }
+float PQAudioProcessorEditor::gainDbToY(float gainDb) const{ float t=juce::jmap(juce::jlimit(-kManualGainRangeDb,kManualGainRangeDb,gainDb),kManualGainRangeDb,-kManualGainRangeDb,0.f,1.f); return chartArea.getY()+chartArea.getHeight()*t; }
+
+int PQAudioProcessorEditor::findBandNear(juce::Point<float> pos) const{
+    constexpr float grabRadius=14.f; int best=-1; float bestDist=grabRadius;
+    for(int i=0;i<PQAudioProcessor::kMaxManualBands;++i){
+        auto& mb=p.manualBands[(size_t)i]; if(!mb.active.load()) continue;
+        juce::Point<float> node(freqToX(mb.freq.load()), gainDbToY(mb.gainDb.load()));
+        float d=node.getDistanceFrom(pos);
+        if(d<bestDist){ bestDist=d; best=i; }
+    }
+    return best;
+}
+
+juce::String PQAudioProcessorEditor::manualTypeLabel(PQAudioProcessor::ManualType t){
+    using T=PQAudioProcessor::ManualType;
+    switch(t){ case T::Bell:return "BELL"; case T::LowShelf:return "LOW SHELF"; case T::HighShelf:return "HIGH SHELF"; case T::LowCut:return "LOW CUT"; case T::HighCut:return "HIGH CUT"; case T::Notch:return "NOTCH"; }
+    return {};
+}
+
+void PQAudioProcessorEditor::drawManualEq(juce::Graphics& g){
+    using T=PQAudioProcessor::ManualType;
+    static const juce::Colour accent(0xffff5c7a);
+    // Combined manual-EQ response curve, computed purely for display (matches the DSP formulas in
+    // PluginProcessor's makeManualCoeff, evaluated as a magnitude response instead of run as audio).
+    juce::Path curve; bool any=false;
+    for(int i=0;i<PQAudioProcessor::kMaxManualBands;++i) if(p.manualBands[(size_t)i].active.load()){ any=true; break; }
+    if(any){
+        constexpr int kPts=200;
+        for(int px=0; px<=kPts; ++px){
+            float t=px/float(kPts); float hz=std::pow(10.f,std::log10(20.f)+t*(std::log10(20000.f)-std::log10(20.f)));
+            double totalDb=0.0;
+            for(int i=0;i<PQAudioProcessor::kMaxManualBands;++i){
+                auto& mb=p.manualBands[(size_t)i]; if(!mb.active.load()) continue;
+                float f0=mb.freq.load(), gain=mb.gainDb.load(), q=juce::jmax(0.1f,mb.q.load());
+                double ratio=hz/(double)f0, logr=std::log2(juce::jmax(1e-6,ratio));
+                switch(mb.type.load()){
+                    case T::Bell: { double bw=1.0/q; totalDb += gain*std::exp(-(logr*logr)/(2.0*bw*bw)); break; }
+                    case T::Notch: { double bw=0.3/q; totalDb += -24.0*std::exp(-(logr*logr)/(2.0*bw*bw)); break; }
+                    case T::LowShelf: totalDb += gain*(1.0/(1.0+std::exp(4.0*logr))); break;
+                    case T::HighShelf: totalDb += gain*(1.0/(1.0+std::exp(-4.0*logr))); break;
+                    case T::LowCut: totalDb += (hz<f0) ? -juce::jmin(48.0, 12.0*(-logr)) : 0.0; break;
+                    case T::HighCut: totalDb += (hz>f0) ? -juce::jmin(48.0, 12.0*logr) : 0.0; break;
+                }
+            }
+            float x=freqToX(hz), y=gainDbToY((float)totalDb);
+            if(px==0) curve.startNewSubPath(x,y); else curve.lineTo(x,y);
+        }
+        g.setColour(accent.withAlpha(0.85f)); g.strokePath(curve, juce::PathStrokeType(2.0f));
+    }
+    // Draggable node handles.
+    for(int i=0;i<PQAudioProcessor::kMaxManualBands;++i){
+        auto& mb=p.manualBands[(size_t)i]; if(!mb.active.load()) continue;
+        float x=freqToX(mb.freq.load()), y=gainDbToY(mb.gainDb.load());
+        bool isDragging=(draggingBand==i);
+        g.setColour(accent.withAlpha(isDragging?1.0f:0.9f));
+        g.drawEllipse(x-6,y-6,12,12,2.0f);
+        if(isDragging){ g.setColour(juce::Colours::white); g.setFont(juce::FontOptions(10));
+            g.drawText(manualTypeLabel(mb.type.load())+"  "+juce::String(mb.freq.load(),0)+"Hz  "+juce::String(mb.gainDb.load(),1)+"dB  Q"+juce::String(mb.q.load(),2), (int)x+10,(int)y-20,220,16,juce::Justification::left); }
+    }
+}
+
+void PQAudioProcessorEditor::mouseDown(const juce::MouseEvent& e){
+    if(!chartArea.contains(e.position)){ draggingBand=-1; return; }
+    int hit=findBandNear(e.position);
+    if(e.mods.isRightButtonDown()){
+        if(hit>=0) showBandTypeMenu(hit, e.getScreenPosition());
+        else showAddBandMenu(e.position, e.getScreenPosition());
+        return;
+    }
+    draggingBand=hit; draggedPastThreshold=false; mouseDownPos=e.position;
+}
+void PQAudioProcessorEditor::mouseDrag(const juce::MouseEvent& e){
+    if(draggingBand<0) return;
+    if(!draggedPastThreshold && e.position.getDistanceFrom(mouseDownPos)<2.0f) return;
+    draggedPastThreshold=true;
+    float hz=xToFreq(e.position.x), gainDb=yToGainDb(e.position.y);
+    p.setManualBandFreqGain(draggingBand, hz, gainDb);
+    repaint();
+}
+void PQAudioProcessorEditor::mouseUp(const juce::MouseEvent&){ draggingBand=-1; draggedPastThreshold=false; }
+void PQAudioProcessorEditor::mouseDoubleClick(const juce::MouseEvent& e){
+    if(!chartArea.contains(e.position)) return;
+    if(findBandNear(e.position)>=0) return; // double-click on an existing node does nothing extra
+    p.addManualBand(PQAudioProcessor::ManualType::Bell, xToFreq(e.position.x), yToGainDb(e.position.y), 0.7f);
+    repaint();
+}
+void PQAudioProcessorEditor::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& w){
+    if(!chartArea.contains(e.position)) return;
+    int hit=findBandNear(e.position); if(hit<0) return;
+    float q=p.manualBands[(size_t)hit].q.load();
+    q=juce::jlimit(0.1f,18.f, q * (1.0f + w.deltaY*0.6f));
+    p.setManualBandQ(hit,q);
+    repaint();
+}
+void PQAudioProcessorEditor::showBandTypeMenu(int bandIndex, juce::Point<int> screenPos){
+    using T=PQAudioProcessor::ManualType;
+    juce::PopupMenu m;
+    m.addItem(1,"Bell"); m.addItem(2,"Low Shelf"); m.addItem(3,"High Shelf"); m.addItem(4,"Low Cut"); m.addItem(5,"High Cut"); m.addItem(6,"Notch");
+    m.addSeparator(); m.addItem(7,"Delete Band");
+    juce::PopupMenu::Options opts; opts = opts.withTargetScreenArea(juce::Rectangle<int>(screenPos,screenPos));
+    m.showMenuAsync(opts, [this,bandIndex](int result){
+        if(result==0) return;
+        if(result==7){ p.removeManualBand(bandIndex); repaint(); return; }
+        static const T types[]={T::Bell,T::LowShelf,T::HighShelf,T::LowCut,T::HighCut,T::Notch};
+        p.setManualBandType(bandIndex, types[result-1]); repaint();
+    });
+}
+void PQAudioProcessorEditor::showAddBandMenu(juce::Point<float> chartPos, juce::Point<int> screenPos){
+    using T=PQAudioProcessor::ManualType;
+    juce::PopupMenu m;
+    m.addItem(1,"Add Bell"); m.addItem(2,"Add Low Shelf"); m.addItem(3,"Add High Shelf"); m.addItem(4,"Add Low Cut"); m.addItem(5,"Add High Cut"); m.addItem(6,"Add Notch");
+    juce::PopupMenu::Options opts; opts = opts.withTargetScreenArea(juce::Rectangle<int>(screenPos,screenPos));
+    float hz=xToFreq(chartPos.x), gainDb=yToGainDb(chartPos.y);
+    m.showMenuAsync(opts, [this,hz,gainDb](int result){
+        if(result==0) return;
+        static const T types[]={T::Bell,T::LowShelf,T::HighShelf,T::LowCut,T::HighCut,T::Notch};
+        float g = (types[result-1]==T::LowCut||types[result-1]==T::HighCut||types[result-1]==T::Notch) ? 0.f : gainDb;
+        p.addManualBand(types[result-1], hz, g, 0.7f); repaint();
+    });
+}
+
+void PQAudioProcessorEditor::paint(juce::Graphics&g){g.fillAll(bg());auto a=getLocalBounds().toFloat();g.setColour(white());g.setFont(juce::FontOptions(29).withStyle("bold"));g.drawText("PQ",28,20,62,32,juce::Justification::left);g.setFont(juce::FontOptions(10));g.setColour(muted());g.drawText("PERFECTION OF MATCH EQ   /   POURIA MOTABEAN",91,25,420,22,juce::Justification::left);
  auto chart=a.reduced(24,72).withHeight(a.getHeight()*.48f);g.setColour(panel());g.fillRoundedRectangle(chart,14);for(int i=1;i<7;i++){g.setColour(grid());g.drawHorizontalLine((int)(chart.getY()+chart.getHeight()*i/7),chart.getX(),chart.getRight());}for(int i=1;i<12;i++){float x=chart.getX()+chart.getWidth()*i/12;g.setColour(grid());g.drawVerticalLine((int)x,chart.getY(),chart.getBottom());}
+ chartArea=chart; // remembered for mouseDown/Drag/Up hit-testing and coordinate mapping
  drawRangeMask(g,chart);
  // FIX: curve visibility now reflects Solo state - only the soloed band is shown at full brightness
  // (the other is dimmed), instead of always drawing all three overlapping at full strength.
@@ -95,7 +221,9 @@ void PQAudioProcessorEditor::paint(juce::Graphics&g){g.fillAll(bg());auto a=getL
  drawCurve(g,chart,p.stereoCurve,curveColour(white(),PQAudioProcessor::SoloBand::Stereo));
  drawCurve(g,chart,p.midCurve,curveColour(yellow(),PQAudioProcessor::SoloBand::Mid));
  drawCurve(g,chart,p.sideCurve,curveColour(blue(),PQAudioProcessor::SoloBand::Side));
+ drawManualEq(g);
  label(g,"20 Hz",{chart.getX(),chart.getBottom()-18,60,18},muted());label(g,"1 kHz",{chart.getCentreX()-25,chart.getBottom()-18,50,18},muted());label(g,"20 kHz",{chart.getRight()-60,chart.getBottom()-18,60,18},muted());
+ label(g,"DOUBLE-CLICK: ADD BAND    RIGHT-CLICK: TYPE / DELETE    DRAG: FREQ+GAIN    SCROLL: Q",{chart.getX(),chart.getY()-16,600,14},muted());
  g.setColour(panel());g.fillRoundedRectangle(24,chart.getBottom()+32,a.getWidth()-48,a.getHeight()-chart.getBottom()-56,14);
  label(g,"MATCH AMOUNT",{42,chart.getBottom()+47,150,18},muted());label(g,"FREQUENCY RANGE",{700,chart.getBottom()+47,180,18},muted());label(g,"MONO → STEREO",{42,chart.getBottom()+153,180,18},muted());label(g,"INPUT / OUTPUT",{900,chart.getBottom()+153,150,18},muted());
  int y=(int)chart.getBottom()+70;
