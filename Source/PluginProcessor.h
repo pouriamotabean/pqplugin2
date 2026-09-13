@@ -8,11 +8,35 @@ class PQAudioProcessor : public juce::AudioProcessor
 public:
     static constexpr int kFFTOrder=13;
     static constexpr int kFFTSize=1<<kFFTOrder;
+    static constexpr int kHopSize=kFFTSize/4; // 75% overlap between analysis frames
     static constexpr int kBins=1024;
     static constexpr int kBands=36;
     enum class WidthMode { MicroShift, Haas, Decorrelated };
     struct Coeff { float b0=1,b1=0,b2=0,a1=0,a2=0; };
     struct Bank { std::array<Coeff,kBands> stereo{},mid{},side{}; };
+
+    // ---- Manual, mouse-only parametric EQ (Pro-Q style) ----------------------------------
+    // This sits on top of the automatic match-EQ, on the final stereo output. It has no knobs:
+    // every band is created, moved, reshaped and deleted purely with the mouse in the editor.
+    enum class ManualType { Bell, LowShelf, HighShelf, LowCut, HighCut, Notch };
+    static constexpr int kMaxManualBands = 16;
+    struct ManualBand {
+        std::atomic<bool> active{false};
+        std::atomic<ManualType> type{ManualType::Bell};
+        std::atomic<float> freq{1000.f};
+        std::atomic<float> gainDb{0.f};
+        std::atomic<float> q{0.7f};
+    };
+    std::array<ManualBand,kMaxManualBands> manualBands{};
+    std::atomic<bool> manualDirty{true};
+    // Editor calls these instead of touching manualBands directly, so the processor can flag
+    // its coefficients dirty and pick the fix an empty slot for a new band.
+    int addManualBand(ManualType type,float freq,float gainDb,float q);
+    void removeManualBand(int index);
+    void setManualBand(int index,ManualType type,float freq,float gainDb,float q);
+    void setManualBandType(int index,ManualType type);
+    void setManualBandFreqGain(int index,float freq,float gainDb);
+    void setManualBandQ(int index,float q);
 
     PQAudioProcessor(); ~PQAudioProcessor() override = default;
     void prepareToPlay(double,int) override; void releaseResources() override {}
@@ -51,12 +75,27 @@ public:
 
 private:
     double sr=44100; juce::dsp::FFT fft{kFFTOrder}; juce::dsp::WindowingFunction<float> window{kFFTSize,juce::dsp::WindowingFunction<float>::hann};
-    std::array<float,kFFTSize> fftMid{},fftSide{}; int fftPos=0;
+    // FIX (analyzer latency): these are now circular history buffers instead of "fill once then
+    // reset to zero" blocks, so analyzeAndUpdate() can run every kHopSize samples using the last
+    // kFFTSize samples of history (75% overlap) instead of waiting a full kFFTSize samples between
+    // updates. fftPos is the write cursor (wraps continuously); hopCounter times the analysis calls.
+    std::array<float,kFFTSize> fftMid{},fftSide{}; int fftPos=0; int hopCounter=0;
     std::array<float,kBins> liveStereo{},liveMid{},liveSide{}; std::array<float,kBands> corrStereo{},corrMid{},corrSide{};
     std::array<Coeff,kBands> stereoCoeff{},midCoeff{},sideCoeff{};
     struct State{float z1=0,z2=0;}; std::array<State,kBands> stStereoL{},stStereoR{},stMid{},stSide{};
-    float prevMono=0; float widthDelay[64]{}; int widthWrite=0;
+    // FIX (widener too subtle): the delay line used to be a fixed 64-sample array, which is under
+    // 1.5ms at typical sample rates - far too short for Haas/decorrelation to be audible. It's now
+    // sized from the sample rate (up to 50ms) in prepareToPlay, and each width mode reads it at a
+    // musically meaningful delay time in milliseconds rather than a fixed sample count.
+    std::vector<float> widthDelay; int widthWriteIdx=0; int widthBufSize=0;
+    float prevMono=0;
     std::atomic<bool> dirty{true};
+
+    // Manual EQ DSP: one coefficient set + one stereo-linked state pair per possible band.
+    std::array<Coeff,kMaxManualBands> manualCoeff{};
+    std::array<State,kMaxManualBands> manualStateL{},manualStateR{};
+    void rebuildManualCoefficients();
+    static Coeff makeManualCoeff(ManualType,float freqHz,float gainDb,float q,double sampleRate);
 
     static float logFreq(float); static float interp(const std::array<float,kBins>&,float);
     static float interpAtomic(const std::array<std::atomic<float>,kBins>&,float);
