@@ -1,5 +1,15 @@
 #include "PluginEditor.h"
-namespace {juce::Colour white(){return juce::Colour(0xfff2f4f7);} juce::Colour yellow(){return juce::Colour(0xffffcf3f);} juce::Colour blue(){return juce::Colour(0xff55a8ff);} juce::Colour bg(){return juce::Colour(0xff07090c);} juce::Colour panel(){return juce::Colour(0xff101419);} juce::Colour grid(){return juce::Colour(0xff242a31);} juce::Colour muted(){return juce::Colour(0xff737e89);} juce::Colour dim(){return juce::Colour(0xff3a4148);}}
+namespace {juce::Colour white(){return juce::Colour(0xfff2f4f7);} juce::Colour yellow(){return juce::Colour(0xffffcf3f);} juce::Colour blue(){return juce::Colour(0xff55a8ff);} juce::Colour bg(){return juce::Colour(0xff07090c);} juce::Colour panel(){return juce::Colour(0xff101419);} juce::Colour grid(){return juce::Colour(0xff242a31);} juce::Colour muted(){return juce::Colour(0xff737e89);} juce::Colour dim(){return juce::Colour(0xff3a4148);}
+// Manual-EQ per-target colours (item 2): distinct from, but recognisably related to, the
+// STEREO/MID/SIDE button colours above, so a glance at a node/curve tells you which signal it sits on.
+juce::Colour manualStereoColour(){return juce::Colour(0xffc7cdd3);} // off-white/grey, family with white()
+juce::Colour manualMidColour(){return juce::Colour(0xffb98a12);}    // darker than yellow()
+juce::Colour manualSideColour(){return juce::Colour(0xff1f4e91);}   // navy, distinct from blue()
+juce::Colour manualTargetColour(PQAudioProcessor::ManualTarget t){
+    using MT=PQAudioProcessor::ManualTarget;
+    switch(t){ case MT::Mid: return manualMidColour(); case MT::Side: return manualSideColour(); default: return manualStereoColour(); }
+}
+}
 
 PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcessorEditor(&x),p(x){setResizable(true,true);setSize(1180,760);
  setupButton(stereo,white());setupButton(mid,yellow());setupButton(side,blue());for(auto*q:{&capture,&apply,&save,&load,&clear})setupButton(*q,white());
@@ -134,7 +144,7 @@ void PQAudioProcessorEditor::drawRangeMask(juce::Graphics&g,juce::Rectangle<floa
 // Minimal vertical bar meter for input/output level (-60dB..0dB mapped to the full height).
 // Kept monochrome/flat to match the rest of the panel, with a small colour shift only near the
 // very top of the range so it still reads as "hot" without introducing a busy gradient.
-void PQAudioProcessorEditor::drawVerticalMeter(juce::Graphics&g,juce::Rectangle<float>r,float levelDb,juce::Colour c){
+void PQAudioProcessorEditor::drawVerticalMeter(juce::Graphics&g,juce::Rectangle<float>r,float levelDb,float peakDb,juce::Colour c){
  g.setColour(panel()); g.fillRoundedRectangle(r,4.f);
  g.setColour(grid()); g.drawRoundedRectangle(r,4.f,1.f);
  constexpr float kFloorDb=-60.f;
@@ -142,6 +152,36 @@ void PQAudioProcessorEditor::drawVerticalMeter(juce::Graphics&g,juce::Rectangle<
  auto fillR=r.reduced(3.f); float fillH=fillR.getHeight()*t;
  auto bar=juce::Rectangle<float>(fillR.getX(),fillR.getBottom()-fillH,fillR.getWidth(),fillH);
  g.setColour(t>0.92f?yellow():c.withAlpha(.85f)); g.fillRoundedRectangle(bar,3.f);
+ // Peak-hold indicator: a thin line at the highest recent peak, which the processor releases
+ // slowly rather than snapping straight to the current level (see PQAudioProcessor::processBlock).
+ float tp=juce::jlimit(0.f,1.f,(peakDb-kFloorDb)/(0.f-kFloorDb));
+ float py=fillR.getBottom()-fillR.getHeight()*tp;
+ g.setColour(juce::Colours::white.withAlpha(.9f));
+ g.fillRect(juce::Rectangle<float>(fillR.getX(),py-1.f,fillR.getWidth(),2.f));
+}
+
+void PQAudioProcessorEditor::drawFreqDbAxis(juce::Graphics& g, juce::Rectangle<float> chart){
+ // Horizontal dB gridlines + numeric labels, tied to the same +/-kManualGainRangeDb coordinate
+ // system the manual EQ nodes use (gainDbToY), so the axis actually matches what dragging a node
+ // does to the chart.
+ static const float dbTicks[]={20.f,10.f,0.f,-10.f,-20.f};
+ g.setFont(juce::FontOptions(9));
+ for(float db:dbTicks){
+     float y=gainDbToY(db);
+     g.setColour(grid().withAlpha(db==0.f?0.9f:0.5f));
+     g.drawHorizontalLine((int)y,chart.getX(),chart.getRight());
+     g.setColour(muted());
+     juce::String txt=(db>0.f?"+":"")+juce::String((int)db);
+     g.drawText(txt,chart.getX()+4.f,y-11.f,32.f,12.f,juce::Justification::left);
+ }
+ // Extra frequency labels alongside the existing 20Hz/1kHz/20kHz ones drawn in paint().
+ auto freqLabel=[&](float hz,juce::String txt){
+     float x=freqToX(hz);
+     g.setColour(muted());
+     g.drawText(txt,x-20.f,chart.getBottom()-18.f,40.f,18.f,juce::Justification::centred);
+ };
+ freqLabel(100.f,"100 Hz");
+ freqLabel(10000.f,"10 kHz");
 }
 
 // ---- Manual EQ chart geometry -------------------------------------------------------------
@@ -168,41 +208,60 @@ juce::String PQAudioProcessorEditor::manualTypeLabel(PQAudioProcessor::ManualTyp
 }
 
 void PQAudioProcessorEditor::drawManualEq(juce::Graphics& g){
-    using T=PQAudioProcessor::ManualType;
-    static const juce::Colour accent(0xffff5c7a);
-    // Combined manual-EQ response curve, computed purely for display (matches the DSP formulas in
+    using T=PQAudioProcessor::ManualType; using MT=PQAudioProcessor::ManualTarget;
+    // FIX (item 1): a 0dB reference line is always visible, even with zero active bands, so the
+    // chart never looks "empty/broken" the moment it's opened.
+    {
+        float y0=gainDbToY(0.f);
+        g.setColour(muted().withAlpha(0.55f));
+        g.drawLine(chartArea.getX(),y0,chartArea.getRight(),y0,1.0f);
+    }
+    // Per-target response curve, computed purely for display (matches the DSP formulas in
     // PluginProcessor's makeManualCoeff, evaluated as a magnitude response instead of run as audio).
-    juce::Path curve; bool any=false;
-    for(int i=0;i<PQAudioProcessor::kMaxManualBands;++i) if(p.manualBands[(size_t)i].active.load()){ any=true; break; }
-    if(any){
-        constexpr int kPts=200;
+    // Split by target (item 2/3): Mid/Side bands only ever shape the Mid/Side signal, so their
+    // on-screen curve is drawn separately from the Stereo one, in that target's colour.
+    auto computeDb=[&](MT target,float hz)->double{
+        double totalDb=0.0;
+        for(int i=0;i<PQAudioProcessor::kMaxManualBands;++i){
+            auto& mb=p.manualBands[(size_t)i]; if(!mb.active.load()||mb.target.load()!=target) continue;
+            float f0=mb.freq.load(), gain=mb.gainDb.load(), q=juce::jmax(0.1f,mb.q.load());
+            double ratio=hz/(double)f0, logr=std::log2(juce::jmax(1e-6,ratio));
+            switch(mb.type.load()){
+                case T::Bell: { double bw=1.0/q; totalDb += gain*std::exp(-(logr*logr)/(2.0*bw*bw)); break; }
+                case T::Notch: { double bw=0.3/q; totalDb += -24.0*std::exp(-(logr*logr)/(2.0*bw*bw)); break; }
+                case T::LowShelf: totalDb += gain*(1.0/(1.0+std::exp(4.0*logr))); break;
+                case T::HighShelf: totalDb += gain*(1.0/(1.0+std::exp(-4.0*logr))); break;
+                case T::LowCut: totalDb += (hz<f0) ? -juce::jmin(48.0, 12.0*(-logr)) : 0.0; break;
+                case T::HighCut: totalDb += (hz>f0) ? -juce::jmin(48.0, 12.0*logr) : 0.0; break;
+            }
+        }
+        return totalDb;
+    };
+    auto anyActive=[&](MT target){
+        for(int i=0;i<PQAudioProcessor::kMaxManualBands;++i){ auto& mb=p.manualBands[(size_t)i]; if(mb.active.load()&&mb.target.load()==target) return true; }
+        return false;
+    };
+    auto drawTargetCurve=[&](MT target,juce::Colour c){
+        if(!anyActive(target)) return;
+        constexpr int kPts=200; juce::Path curve;
         for(int px=0; px<=kPts; ++px){
             float t=px/float(kPts); float hz=std::pow(10.f,std::log10(20.f)+t*(std::log10(20000.f)-std::log10(20.f)));
-            double totalDb=0.0;
-            for(int i=0;i<PQAudioProcessor::kMaxManualBands;++i){
-                auto& mb=p.manualBands[(size_t)i]; if(!mb.active.load()) continue;
-                float f0=mb.freq.load(), gain=mb.gainDb.load(), q=juce::jmax(0.1f,mb.q.load());
-                double ratio=hz/(double)f0, logr=std::log2(juce::jmax(1e-6,ratio));
-                switch(mb.type.load()){
-                    case T::Bell: { double bw=1.0/q; totalDb += gain*std::exp(-(logr*logr)/(2.0*bw*bw)); break; }
-                    case T::Notch: { double bw=0.3/q; totalDb += -24.0*std::exp(-(logr*logr)/(2.0*bw*bw)); break; }
-                    case T::LowShelf: totalDb += gain*(1.0/(1.0+std::exp(4.0*logr))); break;
-                    case T::HighShelf: totalDb += gain*(1.0/(1.0+std::exp(-4.0*logr))); break;
-                    case T::LowCut: totalDb += (hz<f0) ? -juce::jmin(48.0, 12.0*(-logr)) : 0.0; break;
-                    case T::HighCut: totalDb += (hz>f0) ? -juce::jmin(48.0, 12.0*logr) : 0.0; break;
-                }
-            }
-            float x=freqToX(hz), y=gainDbToY((float)totalDb);
+            float x=freqToX(hz), y=gainDbToY((float)computeDb(target,hz));
             if(px==0) curve.startNewSubPath(x,y); else curve.lineTo(x,y);
         }
-        g.setColour(accent.withAlpha(0.85f)); g.strokePath(curve, juce::PathStrokeType(2.0f));
-    }
-    // Draggable node handles.
+        g.setColour(c.withAlpha(0.85f)); g.strokePath(curve, juce::PathStrokeType(2.0f));
+    };
+    drawTargetCurve(MT::Stereo, manualStereoColour());
+    drawTargetCurve(MT::Mid, manualMidColour());
+    drawTargetCurve(MT::Side, manualSideColour());
+
+    // Draggable node handles - every band is drawn regardless of target, coloured to match.
     for(int i=0;i<PQAudioProcessor::kMaxManualBands;++i){
         auto& mb=p.manualBands[(size_t)i]; if(!mb.active.load()) continue;
         float x=freqToX(mb.freq.load()), y=gainDbToY(mb.gainDb.load());
         bool isDragging=(draggingBand==i);
-        g.setColour(accent.withAlpha(isDragging?1.0f:0.9f));
+        juce::Colour c=manualTargetColour(mb.target.load());
+        g.setColour(c.withAlpha(isDragging?1.0f:0.9f));
         g.drawEllipse(x-6,y-6,12,12,2.0f);
         if(isDragging){ g.setColour(juce::Colours::white); g.setFont(juce::FontOptions(10));
             g.drawText(manualTypeLabel(mb.type.load())+"  "+juce::String(mb.freq.load(),0)+"Hz  "+juce::String(mb.gainDb.load(),1)+"dB  Q"+juce::String(mb.q.load(),2), (int)x+10,(int)y-20,220,16,juce::Justification::left); }
@@ -217,6 +276,12 @@ void PQAudioProcessorEditor::mouseDown(const juce::MouseEvent& e){
         else showAddBandMenu(e.position, e.getScreenPosition());
         return;
     }
+    // FIX (item 1): left-clicking empty chart space creates a Bell node immediately and starts
+    // dragging it right away, instead of waiting for a double-click.
+    if(hit<0){
+        hit=p.addManualBand(PQAudioProcessor::ManualType::Bell, xToFreq(e.position.x), yToGainDb(e.position.y), 0.7f);
+        repaint();
+    }
     draggingBand=hit; draggedPastThreshold=false; mouseDownPos=e.position;
 }
 void PQAudioProcessorEditor::mouseDrag(const juce::MouseEvent& e){
@@ -228,11 +293,9 @@ void PQAudioProcessorEditor::mouseDrag(const juce::MouseEvent& e){
     repaint();
 }
 void PQAudioProcessorEditor::mouseUp(const juce::MouseEvent&){ draggingBand=-1; draggedPastThreshold=false; }
-void PQAudioProcessorEditor::mouseDoubleClick(const juce::MouseEvent& e){
-    if(!chartArea.contains(e.position)) return;
-    if(findBandNear(e.position)>=0) return; // double-click on an existing node does nothing extra
-    p.addManualBand(PQAudioProcessor::ManualType::Bell, xToFreq(e.position.x), yToGainDb(e.position.y), 0.7f);
-    repaint();
+void PQAudioProcessorEditor::mouseDoubleClick(const juce::MouseEvent&){
+    // FIX (item 1): node creation now happens on the initial mouseDown (see above), so
+    // double-click no longer has any separate add/delete/merge behaviour of its own.
 }
 void PQAudioProcessorEditor::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& w){
     if(!chartArea.contains(e.position)) return;
@@ -256,23 +319,48 @@ void PQAudioProcessorEditor::showBandTypeMenu(int bandIndex, juce::Point<int> sc
     });
 }
 void PQAudioProcessorEditor::showAddBandMenu(juce::Point<float> chartPos, juce::Point<int> screenPos){
-    using T=PQAudioProcessor::ManualType;
+    using T=PQAudioProcessor::ManualType; using MT=PQAudioProcessor::ManualTarget;
+    // FIX (item 2): right-click on empty chart now asks for Target (Stereo/Mid/Side) as well as
+    // filter Type, via one submenu per target. Result ids are offset per target (Stereo 1-6,
+    // Mid 11-16, Side 21-26) so a single callback can decode both from the chosen id.
+    auto typeSubMenu=[](int base){
+        juce::PopupMenu sub;
+        sub.addItem(base+1,"Bell"); sub.addItem(base+2,"Low Shelf"); sub.addItem(base+3,"High Shelf");
+        sub.addItem(base+4,"Low Cut"); sub.addItem(base+5,"High Cut"); sub.addItem(base+6,"Notch");
+        return sub;
+    };
     juce::PopupMenu m;
-    m.addItem(1,"Add Bell"); m.addItem(2,"Add Low Shelf"); m.addItem(3,"Add High Shelf"); m.addItem(4,"Add Low Cut"); m.addItem(5,"Add High Cut"); m.addItem(6,"Add Notch");
+    m.addSubMenu("Stereo", typeSubMenu(0));
+    m.addSubMenu("Mid",    typeSubMenu(10));
+    m.addSubMenu("Side",   typeSubMenu(20));
     juce::PopupMenu::Options opts; opts = opts.withTargetScreenArea(juce::Rectangle<int>(screenPos,screenPos));
     float hz=xToFreq(chartPos.x), gainDb=yToGainDb(chartPos.y);
     m.showMenuAsync(opts, [this,hz,gainDb](int result){
         if(result==0) return;
         static const T types[]={T::Bell,T::LowShelf,T::HighShelf,T::LowCut,T::HighCut,T::Notch};
-        float g = (types[result-1]==T::LowCut||types[result-1]==T::HighCut||types[result-1]==T::Notch) ? 0.f : gainDb;
-        p.addManualBand(types[result-1], hz, g, 0.7f); repaint();
+        MT target=MT::Stereo; int typeIdx=result;
+        if(result>=21){ target=MT::Side; typeIdx=result-20; }
+        else if(result>=11){ target=MT::Mid; typeIdx=result-10; }
+        if(typeIdx<1||typeIdx>6) return;
+        T type=types[typeIdx-1];
+        float g = (type==T::LowCut||type==T::HighCut||type==T::Notch) ? 0.f : gainDb;
+        p.addManualBand(type, hz, g, 0.7f, target); repaint();
     });
 }
 
 void PQAudioProcessorEditor::paint(juce::Graphics&g){g.fillAll(bg());auto a=getLocalBounds().toFloat();g.setColour(white());g.setFont(juce::FontOptions(29).withStyle("bold"));g.drawText("PQ",28,20,62,32,juce::Justification::left);g.setFont(juce::FontOptions(10));g.setColour(muted());g.drawText("PERFECTION OF MATCH EQ   /   POURIA MOTABEAN",91,25,420,22,juce::Justification::left);
- auto chart=a.reduced(24,72).withHeight(a.getHeight()*.48f);g.setColour(panel());g.fillRoundedRectangle(chart,14);for(int i=1;i<7;i++){g.setColour(grid());g.drawHorizontalLine((int)(chart.getY()+chart.getHeight()*i/7),chart.getX(),chart.getRight());}for(int i=1;i<12;i++){float x=chart.getX()+chart.getWidth()*i/12;g.setColour(grid());g.drawVerticalLine((int)x,chart.getY(),chart.getBottom());}
+ auto chart=a.reduced(24,72).withHeight(a.getHeight()*.48f);g.setColour(panel());g.fillRoundedRectangle(chart,14);for(int i=1;i<12;i++){float x=chart.getX()+chart.getWidth()*i/12;g.setColour(grid());g.drawVerticalLine((int)x,chart.getY(),chart.getBottom());}
  chartArea=chart; // remembered for mouseDown/Drag/Up hit-testing and coordinate mapping
+ drawFreqDbAxis(g,chart); // horizontal dB gridlines (replaces the old un-labelled 7-line grid) + extra freq labels
  drawRangeMask(g,chart);
+ // FIX (item 6): clip everything drawn on top of the chart to its exact rounded-rectangle shape.
+ // Without this, a curve value pushed to the extreme of its range (e.g. a Low/High Shelf at max
+ // gain) draws right up to the rectangular bounds of `chart`, which pokes past the panel's rounded
+ // corners - most visibly at the top-left, since that's the tightest corner relative to typical
+ // curve shapes. Clipping to the same rounded-rect path the panel itself is filled with guarantees
+ // nothing can ever visually escape it, regardless of the underlying data.
+ juce::Path chartClip; chartClip.addRoundedRectangle(chart,14.f);
+ g.saveState(); g.reduceClipRegion(chartClip);
  // FIX (solo wasn't "clean"): soloing used to dim the other bands to 15% instead of hiding them, so
  // their live curve *and* their reference curve (drawn unconditionally, below) both still bled
  // through - which is why a soloed STEREO line never looked fully white. Non-soloed bands (both
@@ -288,8 +376,9 @@ void PQAudioProcessorEditor::paint(juce::Graphics&g){g.fillAll(bg());auto a=getL
  if(visible(PQAudioProcessor::SoloBand::Mid)) drawCurve(g,chart,p.midCurve,yellow());
  if(visible(PQAudioProcessor::SoloBand::Side)) drawCurve(g,chart,p.sideCurve,blue());
  drawManualEq(g);
+ g.restoreState();
  label(g,"20 Hz",{chart.getX(),chart.getBottom()-18,60,18},muted());label(g,"1 kHz",{chart.getCentreX()-25,chart.getBottom()-18,50,18},muted());label(g,"20 kHz",{chart.getRight()-60,chart.getBottom()-18,60,18},muted());
- label(g,"DOUBLE-CLICK: ADD BAND    RIGHT-CLICK: TYPE / DELETE    DRAG: FREQ+GAIN    SCROLL: Q",{chart.getX(),chart.getY()-16,600,14},muted());
+ label(g,"CLICK: ADD BAND    RIGHT-CLICK: TYPE+TARGET / DELETE    DRAG: FREQ+GAIN    SCROLL: Q",{chart.getX(),chart.getY()-16,600,14},muted());
  g.setColour(panel());g.fillRoundedRectangle(24,chart.getBottom()+32,a.getWidth()-48,a.getHeight()-chart.getBottom()-56,14);
  label(g,"MATCH AMOUNT",{42,chart.getBottom()+47,150,18},muted());label(g,"FREQUENCY RANGE",{700,chart.getBottom()+47,180,18},muted());label(g,"MONO → STEREO",{42,chart.getBottom()+153,180,18},muted());
  int y=(int)chart.getBottom()+70;
@@ -301,11 +390,15 @@ void PQAudioProcessorEditor::paint(juce::Graphics&g){g.fillAll(bg());auto a=getL
  g.setFont(juce::FontOptions(9)); g.setColour(muted());
  g.drawText("IN",inputMeterArea.withY(inputMeterArea.getY()-16).withHeight(14),juce::Justification::centred);
  g.drawText("OUT",outputMeterArea.withY(outputMeterArea.getY()-16).withHeight(14),juce::Justification::centred);
- drawVerticalMeter(g,inputMeterArea,p.inputRmsDb.load(),white());
- drawVerticalMeter(g,outputMeterArea,p.outputRmsDb.load(),blue());
+ drawVerticalMeter(g,inputMeterArea,p.inputRmsDb.load(),p.inputPeakDb.load(),white());
+ drawVerticalMeter(g,outputMeterArea,p.outputRmsDb.load(),p.outputPeakDb.load(),blue());
  g.setColour(muted()); g.setFont(juce::FontOptions(8));
  g.drawText(juce::String(p.inputTrimDb.load(),1)+"dB",inputMeterArea.withY(inputMeterArea.getBottom()+2).withHeight(12),juce::Justification::centred);
  g.drawText(juce::String(p.outputTrimDb.load(),1)+"dB",outputMeterArea.withY(outputMeterArea.getBottom()+2).withHeight(12),juce::Justification::centred);
+ // FIX (item 7): "GAIN MATCHED"/etc used to float in the corner with nothing to explain it. It's a
+ // shared status line for CAPTURE/APPLY/CLEAR/SAVE/LOAD/MATCH GAIN feedback, so give it a caption
+ // instead of removing the (still useful) shared line.
+ label(g,"STATUS",{(float)(a.getRight()-320),(float)y+190-16,100,14},muted());
 }
 void PQAudioProcessorEditor::resized(){auto a=getLocalBounds();stereo.setBounds(a.getRight()-305,18,90,36);mid.setBounds(a.getRight()-207,18,90,36);side.setBounds(a.getRight()-109,18,90,36);auto chart=a.reduced(24,72).withHeight(a.getHeight()*.48f);int y=chart.getBottom()+70;sAmt.setBounds(145,y,470,22);mAmt.setBounds(145,y+32,470,22);siAmt.setBounds(145,y+64,470,22);low.setBounds(700,y+18,185,22);high.setBounds(900,y+18,185,22);
  inputMeterArea={700.f,(float)(y+62),70.f,108.f}; outputMeterArea={900.f,(float)(y+62),70.f,108.f};
