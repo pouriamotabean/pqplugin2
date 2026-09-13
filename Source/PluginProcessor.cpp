@@ -167,15 +167,36 @@ void PQAudioProcessor::analyzeAndUpdate(){
         for(int i=0;i<kFFTSize;++i) buf[i]=src[(size_t)((fftPos+i)%kFFTSize)];
         for(int i=kFFTSize;i<kFFTSize*2;++i) buf[i]=0.f;
         window.multiplyWithWindowingTable(buf.data(),kFFTSize); fft.performRealOnlyForwardTransform(buf.data());
+        auto powerAt=[&](int bin)->double{ bin=juce::jlimit(1,kFFTSize/2-1,bin); float re=buf[2*bin],im=buf[2*bin+1]; return (double)(re*re+im*im); };
         for(int i=0;i<kBins;++i){
             float t=i/float(kBins-1);
             float tLo = (i==0) ? t : 0.5f*(t + (i-1)/float(kBins-1));
             float tHi = (i==kBins-1) ? t : 0.5f*(t + (i+1)/float(kBins-1));
-            int binLo = juce::jlimit(1,kFFTSize/2-1,(int)std::floor(hzAt(tLo)*kFFTSize/sr));
-            int binHi = juce::jlimit(binLo,kFFTSize/2-1,(int)std::ceil(hzAt(tHi)*kFFTSize/sr));
-            double sumPow=0.0; int count=0;
-            for(int bIdx=binLo;bIdx<=binHi;++bIdx){ float re=buf[2*bIdx],im=buf[2*bIdx+1]; sumPow += (double)(re*re+im*im); ++count; }
-            float mag = count>0 ? (float)std::sqrt(sumPow/count) : 0.f;
+            float binPosLo = hzAt(tLo)*kFFTSize/sr, binPosHi = hzAt(tHi)*kFFTSize/sr;
+            double sumPow;
+            // FIX (item 7 - low end still "pixelated"): the real FFT bin spacing is sr/kFFTSize
+            // (~2.7Hz even at the bigger 16384-point size). Below a few hundred Hz, one on-screen
+            // point's Hz range (tLo..tHi) covers *less than one real bin*, so the old floor/ceil
+            // range-average kept reusing the exact same one or two bins across many consecutive
+            // points - a flat run that reads as a staircase step. Once the range is sub-bin-width we
+            // now linearly interpolate power between the two nearest real bins at the exact
+            // fractional bin position instead, so the value changes smoothly point-to-point even
+            // though the underlying frequency resolution hasn't changed. Above that point (most of
+            // the spectrum) nothing changes - the original multi-bin averaging still runs.
+            if (binPosHi - binPosLo < 1.0f) {
+                float centerPos = 0.5f*(binPosLo+binPosHi);
+                int b0 = juce::jlimit(1,kFFTSize/2-2,(int)std::floor(centerPos));
+                float frac = centerPos - (float)b0;
+                double p0 = powerAt(b0), p1 = powerAt(b0+1);
+                sumPow = p0 + (p1-p0)*(double)frac;
+            } else {
+                int binLo = juce::jlimit(1,kFFTSize/2-1,(int)std::floor(binPosLo));
+                int binHi = juce::jlimit(binLo,kFFTSize/2-1,(int)std::ceil(binPosHi));
+                double sp=0.0; int count=0;
+                for(int bIdx=binLo;bIdx<=binHi;++bIdx){ sp+=powerAt(bIdx); ++count; }
+                sumPow = sp/juce::jmax(1,count);
+            }
+            float mag = (float)std::sqrt(juce::jmax(0.0,sumPow));
             dst[(size_t)i]=juce::Decibels::gainToDecibels(mag/(float)kFFTSize+1e-9f);
         }
     };
@@ -273,19 +294,17 @@ void PQAudioProcessor::matchGain(){
     outputTrimDb.store(juce::jlimit(-24.f,24.f,outputTrimDb.load()+diff));
 }
 
+// FIX (item 6): a "preset" is now defined as the *entire* plugin state - reference curves, manual
+// EQ bands, width, match amounts and trims - not just the reference curve. Both save and load now
+// go through getStateInformation()/applyStateBlock(), the exact same code path the host uses for
+// session save/restore, so there is only ever one serialization format to keep correct.
 bool PQAudioProcessor::saveReference(const juce::File& f){
-    juce::MemoryOutputStream o; o.writeInt(0x50525133); o.writeInt(kBins);
-    for(auto* a:{&refStereo,&refMid,&refSide}) for(int i=0;i<kBins;++i) o.writeFloat((*a)[(size_t)i].load());
-    o.writeFloat(lowHz.load());o.writeFloat(highHz.load());o.writeFloat(maxCorrectionDb.load());o.writeFloat(smoothingOctaves.load());
-    return f.replaceWithData(o.getData(),o.getDataSize());
+    juce::MemoryBlock mb; getStateInformation(mb);
+    return f.replaceWithData(mb.getData(),mb.getSize());
 }
 bool PQAudioProcessor::loadReference(const juce::File& f){
     juce::MemoryBlock mb; if(!f.loadFileAsData(mb))return false;
-    juce::MemoryInputStream in(mb,false);
-    if(in.readInt()!=0x50525133||in.readInt()!=kBins)return false; // FIX: bumped magic since on-disk layout changed (atomic-per-float write order is unchanged, but this guards against loading a v1.2 .pqref file with a different internal format silently)
-    for(auto* a:{&refStereo,&refMid,&refSide}) for(int i=0;i<kBins;++i) (*a)[(size_t)i].store(in.readFloat());
-    lowHz.store(in.readFloat());highHz.store(in.readFloat());maxCorrectionDb.store(in.readFloat());smoothingOctaves.store(in.readFloat());
-    hasReference.store(true);applyMatch();return true;
+    return applyStateBlock(mb.getData(),(int)mb.getSize());
 }
 
 void PQAudioProcessor::getStateInformation(juce::MemoryBlock& d){
@@ -300,10 +319,21 @@ void PQAudioProcessor::getStateInformation(juce::MemoryBlock& d){
     o.writeInt(kMaxManualBands);
     for(auto& mb:manualBands){ o.writeBool(mb.active.load()); o.writeInt((int)mb.type.load()); o.writeFloat(mb.freq.load()); o.writeFloat(mb.gainDb.load()); o.writeFloat(mb.q.load()); o.writeInt((int)mb.target.load()); }
 }
-void PQAudioProcessor::setStateInformation(const void* data,int size){
+void PQAudioProcessor::setStateInformation(const void* data,int size){ applyStateBlock(data,size); }
+
+bool PQAudioProcessor::applyStateBlock(const void* data,int size){
     juce::MemoryInputStream in(data,(size_t)size,false);
     auto magic=in.readInt();
-    if(magic!=0x50515338 && magic!=0x50515337 && magic!=0x50515336 && magic!=0x50515335 && magic!=0x50515334 && magic!=0x50515333 && magic!=0x50515332) return; // unknown/corrupt state: ignore rather than risk misreading garbage into the DSP
+    // Legacy reference-only .pqref (pre-preset era). Load *only* the reference + range/limits and
+    // stop - every other current setting (manual EQ, width, trims, match amounts) is left exactly
+    // as it was, so opening an old file can never silently reset things it never saved.
+    if(magic==0x50525133){
+        if(in.readInt()!=kBins) return false;
+        for(auto* a:{&refStereo,&refMid,&refSide}) for(int i=0;i<kBins;++i) (*a)[(size_t)i].store(in.readFloat());
+        lowHz.store(in.readFloat());highHz.store(in.readFloat());maxCorrectionDb.store(in.readFloat());smoothingOctaves.store(in.readFloat());
+        hasReference.store(true); applyMatch(); return true;
+    }
+    if(magic!=0x50515338 && magic!=0x50515337 && magic!=0x50515336 && magic!=0x50515335 && magic!=0x50515334 && magic!=0x50515333 && magic!=0x50515332) return false; // unknown/corrupt state: ignore rather than risk misreading garbage into the DSP
     bool hasManualTarget = (magic==0x50515338);
     bool hasTrim = (magic==0x50515338 || magic==0x50515337);
     bool hasManualEq = (magic==0x50515338 || magic==0x50515337 || magic==0x50515336);
@@ -333,6 +363,7 @@ void PQAudioProcessor::setStateInformation(const void* data,int size){
     manualDirty.store(true);
     solo.store(SoloBand::None);
     applyMatch();
+    return true;
 }
 juce::AudioProcessorEditor* PQAudioProcessor::createEditor(){return new PQAudioProcessorEditor(*this);}
 
