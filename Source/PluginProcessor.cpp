@@ -15,7 +15,7 @@ void PQAudioProcessor::prepareToPlay(double sampleRate,int samplesPerBlock){
     // have enough room to use musically real delay times (see applyWidth in processBlock).
     widthBufSize = juce::jmax(64,(int)std::round(sr*0.05)+8); widthDelay.assign((size_t)widthBufSize,0.f); widthWriteIdx=0;
     for(int i=0;i<kBands;++i){float t=i/float(kBands-1); bandHz[i]=std::exp(std::log(20.f)+t*(std::log(20000.f)-std::log(20.f)));}
-    stStereoL.fill({});stStereoR.fill({});stMid.fill({});stSide.fill({}); manualStateL.fill({}); manualStateR.fill({});
+    stStereoL.fill({});stStereoR.fill({});stMid.fill({});stSide.fill({}); manualStateL.fill({}); manualStateR.fill({}); manualStateMid.fill({}); manualStateSide.fill({});
     dirty.store(true); manualDirty.store(true); rebuildCoefficients(); rebuildManualCoefficients();
 }
 
@@ -44,8 +44,10 @@ void PQAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
     if(manualDirty.exchange(false)) rebuildManualCoefficients();
     const float inGain=juce::Decibels::decibelsToGain(inputTrimDb.load());
     const float outGain=juce::Decibels::decibelsToGain(outputTrimDb.load());
+    float inPeakLin=0.f, outPeakLin=0.f;
     for(int i=0;i<n;++i){
         float L=b.getSample(0,i)*inGain, R=(trueMono?L:b.getSample(1,i)*inGain); inSum += .5f*(L*L+R*R);
+        inPeakLin = juce::jmax(inPeakLin, std::abs(L), std::abs(R));
 
         // FIX (widener strength): delay times are now musically meaningful (ms, scaled to sample
         // rate) instead of a fixed ~1.3ms 64-sample buffer, so each mode is actually audible.
@@ -88,20 +90,32 @@ void PQAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
             // isolated - hear the full corrected mix").
             if(dirty.exchange(false)) rebuildCoefficients();
             for(int k=0;k<kBands;++k) m=process(midCoeff[k],stMid[k],m);
+            // Manual bands targeting Mid: applied to the Mid leg only, before it's folded back into
+            // L/R, so they never leak into the Side signal.
+            for(int mbI=0;mbI<kMaxManualBands;++mbI){
+                auto& band=manualBands[(size_t)mbI]; if(!band.active.load()||band.target.load()!=ManualTarget::Mid) continue;
+                m=process(manualCoeff[(size_t)mbI],manualStateMid[(size_t)mbI],m);
+            }
             for(int k=0;k<kBands;++k) s=process(sideCoeff[k],stSide[k],s);
+            // Manual bands targeting Side: same idea, on the Side leg only.
+            for(int mbI=0;mbI<kMaxManualBands;++mbI){
+                auto& band=manualBands[(size_t)mbI]; if(!band.active.load()||band.target.load()!=ManualTarget::Side) continue;
+                s=process(manualCoeff[(size_t)mbI],manualStateSide[(size_t)mbI],s);
+            }
             L=m+s; R=m-s;
             for(int k=0;k<kBands;++k){L=process(stereoCoeff[k],stStereoL[k],L); R=process(stereoCoeff[k],stStereoR[k],R);}
             if(widthPost) applyWidth(L,R);
-            // Manual, mouse-placed EQ bands: the final stage, applied identically (same
-            // coefficients, independent state) to both channels so it never introduces width.
-            for(int mb=0;mb<kMaxManualBands;++mb){
-                if(!manualBands[(size_t)mb].active.load()) continue;
-                L=process(manualCoeff[(size_t)mb],manualStateL[(size_t)mb],L);
-                R=process(manualCoeff[(size_t)mb],manualStateR[(size_t)mb],R);
+            // Manual bands targeting Stereo: the final stage, applied identically (same
+            // coefficients, independent per-channel state) to both channels so it never introduces width.
+            for(int mbI=0;mbI<kMaxManualBands;++mbI){
+                auto& band=manualBands[(size_t)mbI]; if(!band.active.load()||band.target.load()!=ManualTarget::Stereo) continue;
+                L=process(manualCoeff[(size_t)mbI],manualStateL[(size_t)mbI],L);
+                R=process(manualCoeff[(size_t)mbI],manualStateR[(size_t)mbI],R);
             }
         }
         L*=outGain; R*=outGain;
         b.setSample(0,i,L); if(ch>1)b.setSample(1,i,R); outSum += .5f*(L*L+R*R);
+        outPeakLin = juce::jmax(outPeakLin, std::abs(L), std::abs(R));
         // FIX (analyzer latency): advance the circular history buffer every sample, but only run the
         // (expensive) analysis every kHopSize samples - a 75% overlap - instead of once per full
         // kFFTSize block, so the on-screen curve updates ~4x more often with much lower perceived lag.
@@ -117,6 +131,20 @@ void PQAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
         float prevIn=inputRmsDb.load(), prevOut=outputRmsDb.load();
         inputRmsDb.store(prevIn+meterSmooth*(inDb-prevIn));
         outputRmsDb.store(prevOut+meterSmooth*(outDb-prevOut));
+
+        // Peak-hold: jump up instantly to this block's true peak, otherwise release the held value
+        // at a fixed dB/sec rate - a thin peak-hold line next to the RMS bar (see drawVerticalMeter)
+        // instead of just the current level. matchGain() below reads these, not the RMS pair, so it
+        // can neutralize an actual peak change rather than just an average-loudness one.
+        constexpr float kPeakDecayDbPerSec=12.f;
+        const float decayThisBlock = kPeakDecayDbPerSec * (float)n / (float)juce::jmax(1.0,sr);
+        auto updatePeak=[&](std::atomic<float>& peakAtomic,float peakLin){
+            float instDb=juce::Decibels::gainToDecibels(peakLin+1e-9f);
+            float decayed=peakAtomic.load()-decayThisBlock;
+            peakAtomic.store(juce::jmax(instDb,decayed,kFloor));
+        };
+        updatePeak(inputPeakDb,inPeakLin);
+        updatePeak(outputPeakDb,outPeakLin);
     }
 }
 
@@ -203,16 +231,27 @@ void PQAudioProcessor::rebuildManualCoefficients(){
         manualCoeff[(size_t)i]=makeManualCoeff(mb.type.load(),mb.freq.load(),mb.gainDb.load(),mb.q.load(),sr);
     }
 }
-int PQAudioProcessor::addManualBand(ManualType type,float freq,float gainDb,float q){
+int PQAudioProcessor::addManualBand(ManualType type,float freq,float gainDb,float q,ManualTarget target){
     for(int i=0;i<kMaxManualBands;++i){ auto& mb=manualBands[(size_t)i];
         if(!mb.active.load()){
-            mb.type.store(type); mb.freq.store(juce::jlimit(20.f,20000.f,freq)); mb.gainDb.store(juce::jlimit(-24.f,24.f,gainDb)); mb.q.store(juce::jlimit(0.1f,18.f,q));
+            mb.type.store(type); mb.target.store(target); mb.freq.store(juce::jlimit(20.f,20000.f,freq)); mb.gainDb.store(juce::jlimit(-24.f,24.f,gainDb)); mb.q.store(juce::jlimit(0.1f,18.f,q));
+            // Slot may be reused from a previously deleted band; clear all four possible filter
+            // states so no stale history from that old band (or an old target) leaks in.
+            manualStateL[(size_t)i]={}; manualStateR[(size_t)i]={}; manualStateMid[(size_t)i]={}; manualStateSide[(size_t)i]={};
             mb.active.store(true); manualDirty.store(true); return i;
         }
     }
     return -1; // no free slot (kMaxManualBands reached)
 }
 void PQAudioProcessor::removeManualBand(int index){ if(index<0||index>=kMaxManualBands)return; manualBands[(size_t)index].active.store(false); manualDirty.store(true); }
+void PQAudioProcessor::setManualBandTarget(int index,ManualTarget target){
+    if(index<0||index>=kMaxManualBands)return; auto& mb=manualBands[(size_t)index];
+    if(mb.target.load()==target) return;
+    mb.target.store(target);
+    // Reset every path's state on the switch (see header comment on setManualBandTarget) so the
+    // band starts clean on its new signal instead of continuing from unrelated filter history.
+    manualStateL[(size_t)index]={}; manualStateR[(size_t)index]={}; manualStateMid[(size_t)index]={}; manualStateSide[(size_t)index]={};
+}
 void PQAudioProcessor::setManualBand(int index,ManualType type,float freq,float gainDb,float q){ if(index<0||index>=kMaxManualBands)return; auto& mb=manualBands[(size_t)index]; mb.type.store(type); mb.freq.store(juce::jlimit(20.f,20000.f,freq)); mb.gainDb.store(juce::jlimit(-24.f,24.f,gainDb)); mb.q.store(juce::jlimit(0.1f,18.f,q)); manualDirty.store(true); }
 void PQAudioProcessor::setManualBandType(int index,ManualType type){ if(index<0||index>=kMaxManualBands)return; manualBands[(size_t)index].type.store(type); manualDirty.store(true); }
 void PQAudioProcessor::setManualBandFreqGain(int index,float freq,float gainDb){ if(index<0||index>=kMaxManualBands)return; auto& mb=manualBands[(size_t)index]; mb.freq.store(juce::jlimit(20.f,20000.f,freq)); mb.gainDb.store(juce::jlimit(-24.f,24.f,gainDb)); manualDirty.store(true); }
@@ -223,11 +262,14 @@ void PQAudioProcessor::captureReference(){for(int i=0;i<kBins;++i){refStereo[i].
 void PQAudioProcessor::clearReference(){hasReference.store(false);corrStereo.fill(0);corrMid.fill(0);corrSide.fill(0);dirty.store(true);}
 void PQAudioProcessor::applyMatch(){if(!hasReference.load())return;buildCorrection(corrMid,refMid,liveMid,midMatch.load());buildCorrection(corrSide,refSide,liveSide,sideMatch.load());buildCorrection(corrStereo,refStereo,liveStereo,stereoMatch.load());dirty.store(true);}
 
-// "MATCH GAIN": nudges outputTrimDb so the (already-trimmed) output meter reads the same average
-// level as the input meter. Since outputTrimDb is a plain linear gain in dB, and outputRmsDb was
-// measured *with* the current trim already applied, the correction is just the remaining gap.
+// "MATCH GAIN": nudges outputTrimDb so the (already-trimmed) output's true peak reads the same as
+// the input's true peak - not the average (RMS) level. If the EQ/match/width processing raised or
+// lowered the output's peak versus the input, that's exactly what this cancels out, so an A/B
+// against the input isn't biased by a peak change the frequency correction introduced. Since
+// outputTrimDb is a plain linear gain in dB, and outputPeakDb was measured *with* the current trim
+// already applied, the correction is just the remaining gap between the two peak-hold values.
 void PQAudioProcessor::matchGain(){
-    float diff=inputRmsDb.load()-outputRmsDb.load();
+    float diff=inputPeakDb.load()-outputPeakDb.load();
     outputTrimDb.store(juce::jlimit(-24.f,24.f,outputTrimDb.load()+diff));
 }
 
@@ -248,7 +290,7 @@ bool PQAudioProcessor::loadReference(const juce::File& f){
 
 void PQAudioProcessor::getStateInformation(juce::MemoryBlock& d){
     juce::MemoryOutputStream o(d,true);
-    o.writeInt(0x50515337); // FIX: version bumped (was 0x50515336) to add input/output trim
+    o.writeInt(0x50515338); // FIX: version bumped (was 0x50515337) to add per-band manual-EQ target (Stereo/Mid/Side)
     for(float v:{stereoMatch.load(),midMatch.load(),sideMatch.load(),lowHz.load(),highHz.load(),maxCorrectionDb.load(),smoothingOctaves.load(),widthAmount.load(),widthDepth.load()})o.writeFloat(v);
     o.writeInt((int)widthMode.load());
     o.writeBool(widthPostEq.load());
@@ -256,15 +298,16 @@ void PQAudioProcessor::getStateInformation(juce::MemoryBlock& d){
     o.writeBool(hasReference.load());
     if(hasReference.load()) for(auto* a:{&refStereo,&refMid,&refSide}) for(int i=0;i<kBins;++i) o.writeFloat((*a)[(size_t)i].load());
     o.writeInt(kMaxManualBands);
-    for(auto& mb:manualBands){ o.writeBool(mb.active.load()); o.writeInt((int)mb.type.load()); o.writeFloat(mb.freq.load()); o.writeFloat(mb.gainDb.load()); o.writeFloat(mb.q.load()); }
+    for(auto& mb:manualBands){ o.writeBool(mb.active.load()); o.writeInt((int)mb.type.load()); o.writeFloat(mb.freq.load()); o.writeFloat(mb.gainDb.load()); o.writeFloat(mb.q.load()); o.writeInt((int)mb.target.load()); }
 }
 void PQAudioProcessor::setStateInformation(const void* data,int size){
     juce::MemoryInputStream in(data,(size_t)size,false);
     auto magic=in.readInt();
-    if(magic!=0x50515337 && magic!=0x50515336 && magic!=0x50515335 && magic!=0x50515334 && magic!=0x50515333 && magic!=0x50515332) return; // unknown/corrupt state: ignore rather than risk misreading garbage into the DSP
-    bool hasTrim = (magic==0x50515337);
-    bool hasManualEq = (magic==0x50515337 || magic==0x50515336);
-    bool hasWidthStage = (magic==0x50515337 || magic==0x50515336 || magic==0x50515335);
+    if(magic!=0x50515338 && magic!=0x50515337 && magic!=0x50515336 && magic!=0x50515335 && magic!=0x50515334 && magic!=0x50515333 && magic!=0x50515332) return; // unknown/corrupt state: ignore rather than risk misreading garbage into the DSP
+    bool hasManualTarget = (magic==0x50515338);
+    bool hasTrim = (magic==0x50515338 || magic==0x50515337);
+    bool hasManualEq = (magic==0x50515338 || magic==0x50515337 || magic==0x50515336);
+    bool hasWidthStage = (magic==0x50515338 || magic==0x50515337 || magic==0x50515336 || magic==0x50515335);
     bool hadOldEnableFlags = (magic==0x50515333); // v3 wrote 3 bools we no longer use; skip them so the rest of the stream stays aligned
     stereoMatch.store(in.readFloat());midMatch.store(in.readFloat());sideMatch.store(in.readFloat());
     lowHz.store(in.readFloat());highHz.store(in.readFloat());maxCorrectionDb.store(in.readFloat());smoothingOctaves.store(in.readFloat());
@@ -276,12 +319,15 @@ void PQAudioProcessor::setStateInformation(const void* data,int size){
     bool hr=in.readBool();
     if(hr) for(auto* a:{&refStereo,&refMid,&refSide}) for(int i=0;i<kBins;++i) (*a)[(size_t)i].store(in.readFloat());
     hasReference.store(hr);
-    for(auto& mb:manualBands) mb.active.store(false); // clear before loading, in case an older/smaller save is loaded
+    for(auto& mb:manualBands){ mb.active.store(false); mb.target.store(ManualTarget::Stereo); } // clear before loading, in case an older/smaller save is loaded
     if(hasManualEq){
         int savedCount=in.readInt();
         for(int i=0;i<savedCount;++i){
             bool active=in.readBool(); auto type=(ManualType)in.readInt(); float f=in.readFloat(), g=in.readFloat(), q=in.readFloat();
-            if(i<kMaxManualBands && active){ auto& mb=manualBands[(size_t)i]; mb.type.store(type); mb.freq.store(f); mb.gainDb.store(g); mb.q.store(q); mb.active.store(true); }
+            // Older saves (pre-target) have no target field on disk; those bands default to Stereo,
+            // which is exactly how they behaved before this field existed.
+            ManualTarget target = hasManualTarget ? (ManualTarget)in.readInt() : ManualTarget::Stereo;
+            if(i<kMaxManualBands && active){ auto& mb=manualBands[(size_t)i]; mb.type.store(type); mb.freq.store(f); mb.gainDb.store(g); mb.q.store(q); mb.target.store(target); mb.active.store(true); }
         }
     }
     manualDirty.store(true);
