@@ -121,3 +121,11 @@ void PQAudioProcessor::setStateInformation(const void* data,int size){
     applyMatch();
 }
 juce::AudioProcessorEditor* PQAudioProcessor::createEditor(){return new PQAudioProcessorEditor(*this);}
+
+// Required by JUCE's plugin client wrapper (VST3/AU/etc.) to know which
+// AudioProcessor subclass to instantiate. Without this, the plugin compiles
+// fine but fails at link time with "unresolved external symbol createPluginFilter".
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new PQAudioProcessor();
+}
