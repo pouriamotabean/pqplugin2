@@ -12,6 +12,26 @@ public:
     juce::Font getPopupMenuFont() override { return juce::Font(juce::FontOptions(30.0f)); } // ~3x a normal menu font
 };
 
+// FIX (item 2/3): the old show/hide checkboxes were plain ToggleButtons stacked directly under the
+// big STEREO/MID/SIDE buttons - their labels and hit-boxes sat close enough to those buttons to be
+// fiddly/ambiguous to click. They're now small solid dots living on the header row next to PRESETS,
+// coloured to match each target - no text needed, the colour says which is which. Filled = visible,
+// hollow ring = hidden. setDotColour() is called once from the editor's constructor (colours live
+// in PluginEditor.cpp) rather than passed through the constructor, so this stays a simple, tool-free
+// member.
+class CircleToggle : public juce::Button {
+public:
+    CircleToggle():juce::Button({}){ setClickingTogglesState(true); setToggleState(true, juce::dontSendNotification); }
+    void setDotColour(juce::Colour c){ colour=c; repaint(); }
+    void paintButton(juce::Graphics& g, bool isMouseOver, bool) override {
+        auto r = getLocalBounds().toFloat().reduced(1.f);
+        if(getToggleState()){ g.setColour(colour); g.fillEllipse(r); }
+        else { g.setColour(colour.withAlpha(isMouseOver?0.75f:0.45f)); g.drawEllipse(r,2.0f); }
+    }
+private:
+    juce::Colour colour{juce::Colours::white};
+};
+
 // ---- Preset panel (item 6) -------------------------------------------------------------------
 // Replaces the old bottom-row SAVE/LOAD buttons with a small top-of-window browser, opened/closed
 // from a single PRESETS button. A "preset" is the plugin's full state (reference + manual EQ +
@@ -62,7 +82,7 @@ private:
  // FIX (item 3): independent show/hide toggles for each manual-EQ target's curve+nodes, so the
  // chart can be decluttered once a target's editing is finished (still edited via checking it back
  // on - hiding never touches the underlying bands or the audio, purely a display filter).
- juce::ToggleButton stereoEqToggle,midEqToggle,sideEqToggle;
+ CircleToggle stereoEqToggle,midEqToggle,sideEqToggle;
  BigPopupLookAndFeel bigMenuLnf;
  void timerCallback()override{repaint();} void setupButton(juce::TextButton&,juce::Colour); void setupSlider(juce::Slider&,double,double,double); void setupVerticalTrim(juce::Slider&); void label(juce::Graphics&,juce::String,juce::Rectangle<float>,juce::Colour);
  void refreshBandButtons();
