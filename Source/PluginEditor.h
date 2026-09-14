@@ -68,6 +68,10 @@ public: explicit PQAudioProcessorEditor(PQAudioProcessor&); ~PQAudioProcessorEdi
  bool keyPressed(const juce::KeyPress&) override;
 private:
  PQAudioProcessor& p; juce::TextButton stereo{"STEREO"},mid{"MID"},side{"SIDE"},capture{"CAPTURE"},apply{"APPLY"},clear{"CLEAR"},widthStage{"PRE"},matchGainBtn{"MATCH GAIN"},presetsBtn{"PRESETS"};
+ // FIX (quick presets, requested tonight): four one-click starting points built from the existing
+ // manual-EQ engine (same addManualBand() the mouse-driven chart already uses) - not a new system.
+ juce::TextButton qpMono{"MONO < 120Hz"}, qpSideAir{"SIDE AIR"}, qpMidScoop{"MID SCOOP"}, qpLowClean{"LOW CLEANUP"};
+ void addQuickPreset(PQAudioProcessor::ManualType type,float freq,float gainDb,float q,PQAudioProcessor::ManualTarget target);
  juce::Slider sAmt,mAmt,siAmt,low,high,width,depth;
  // Max dB / Smoothing are no longer exposed as sliders (kept fixed at sane defaults in the
  // processor); this screen space now holds the input/output level meters + trim faders instead.
