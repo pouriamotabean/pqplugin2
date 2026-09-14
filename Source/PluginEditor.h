@@ -67,7 +67,7 @@ public: explicit PQAudioProcessorEditor(PQAudioProcessor&); ~PQAudioProcessorEdi
  // not just via the right-click "Delete Band" menu item.
  bool keyPressed(const juce::KeyPress&) override;
 private:
- PQAudioProcessor& p; juce::TextButton stereo{"STEREO"},mid{"MID"},side{"SIDE"},capture{"CAPTURE"},apply{"APPLY"},clear{"CLEAR"},widthStage{"PRE"},matchGainBtn{"MATCH GAIN"},presetsBtn{"PRESETS"};
+ PQAudioProcessor& p; juce::TextButton stereo{"STEREO"},mid{"MID"},side{"SIDE"},capture{"CAPTURE"},apply{"APPLY"},clear{"CLEAR"},widthStage{"PRE"},matchGainBtn{"MATCH GAIN"},presetsBtn{"PRESETS"},bypass{"BYPASS"};
  juce::Slider sAmt,mAmt,siAmt,low,high,width,depth;
  // Max dB / Smoothing are no longer exposed as sliders (kept fixed at sane defaults in the
  // processor); this screen space now holds the input/output level meters + trim faders instead.
@@ -97,6 +97,7 @@ private:
  BigPopupLookAndFeel bigMenuLnf;
  void timerCallback()override{repaint();} void setupButton(juce::TextButton&,juce::Colour); void setupSlider(juce::Slider&,double,double,double); void setupVerticalTrim(juce::Slider&); void label(juce::Graphics&,juce::String,juce::Rectangle<float>,juce::Colour);
  void refreshBandButtons();
+ void refreshBypassButton();
  void drawCurve(juce::Graphics&,juce::Rectangle<float>,const std::array<std::atomic<float>,PQAudioProcessor::kBins>&,juce::Colour); void drawRef(juce::Graphics&,juce::Rectangle<float>,const std::array<std::atomic<float>,PQAudioProcessor::kBins>&,juce::Colour);
  void drawRangeMask(juce::Graphics&,juce::Rectangle<float>);
  // Minimal vertical bar meter (input/output level), drawn behind the trim slider of the same name.
