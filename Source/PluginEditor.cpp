@@ -340,8 +340,8 @@ void PQAudioProcessorEditor::drawManualEq(juce::Graphics& g){
                 case T::Notch: { double bw=0.3/q; totalDb += -24.0*std::exp(-(logr*logr)/(2.0*bw*bw)); break; }
                 case T::LowShelf: totalDb += gain*(1.0/(1.0+std::exp(4.0*logr))); break;
                 case T::HighShelf: totalDb += gain*(1.0/(1.0+std::exp(-4.0*logr))); break;
-                case T::LowCut: totalDb += (hz<f0) ? -juce::jmin(48.0, 12.0*(-logr)) : 0.0; break;
-                case T::HighCut: totalDb += (hz>f0) ? -juce::jmin(48.0, 12.0*logr) : 0.0; break;
+                case T::LowCut: totalDb += (hz<f0) ? -juce::jmin(48.0, (double)mb.slopeOrder.load()*(-logr)) : 0.0; break;
+                case T::HighCut: totalDb += (hz>f0) ? -juce::jmin(48.0, (double)mb.slopeOrder.load()*logr) : 0.0; break;
             }
         }
         return totalDb;
@@ -384,7 +384,9 @@ void PQAudioProcessorEditor::drawManualEq(juce::Graphics& g){
         g.drawEllipse(x-6,y-6,12,12,2.0f);
         if(isSelected) g.fillEllipse(x-2.5f,y-2.5f,5.f,5.f);
         if(isDragging){ g.setColour(juce::Colours::white); g.setFont(juce::FontOptions(10));
-            g.drawText(manualTypeLabel(mb.type.load())+"  "+juce::String(mb.freq.load(),0)+"Hz  "+juce::String(mb.gainDb.load(),1)+"dB  Q"+juce::String(mb.q.load(),2), (int)x+10,(int)y-20,220,16,juce::Justification::left); }
+            using T2=PQAudioProcessor::ManualType; bool isCut=(mb.type.load()==T2::LowCut||mb.type.load()==T2::HighCut);
+            juce::String detail = isCut ? (juce::String(mb.slopeOrder.load())+"dB/oct") : ("Q"+juce::String(mb.q.load(),2));
+            g.drawText(manualTypeLabel(mb.type.load())+"  "+juce::String(mb.freq.load(),0)+"Hz  "+juce::String(mb.gainDb.load(),1)+"dB  "+detail, (int)x+10,(int)y-20,220,16,juce::Justification::left); }
     }
 }
 
@@ -426,9 +428,23 @@ void PQAudioProcessorEditor::mouseDoubleClick(const juce::MouseEvent&){
 void PQAudioProcessorEditor::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& w){
     if(!chartArea.contains(e.position)) return;
     int hit=findBandNear(e.position); if(hit<0) return;
-    float q=p.manualBands[(size_t)hit].q.load();
-    q=juce::jlimit(0.1f,18.f, q * (1.0f + w.deltaY*0.6f));
-    p.setManualBandQ(hit,q);
+    using T=PQAudioProcessor::ManualType;
+    auto& mb=p.manualBands[(size_t)hit];
+    if(mb.type.load()==T::LowCut || mb.type.load()==T::HighCut){
+        // FIX: scroll on a Low/High Cut node used to adjust Q, which only nudges the resonance
+        // bump right at the cutoff - it never changed the actual roll-off, so nothing looked or
+        // sounded different. Scroll now steps through the six standard slopes instead, same as it
+        // already did (via Q) for Bell/Notch/Shelf - see setManualBandSlope() for the real DSP change.
+        const auto& steps=PQAudioProcessor::kCutSlopeSteps;
+        int cur=mb.slopeOrder.load(), idx=0;
+        for(int i=0;i<(int)steps.size();++i) if(steps[(size_t)i]==cur){ idx=i; break; }
+        idx=juce::jlimit(0,(int)steps.size()-1, idx + (w.deltaY>0?1:-1));
+        p.setManualBandSlope(hit, steps[(size_t)idx]);
+    } else {
+        float q=mb.q.load();
+        q=juce::jlimit(0.1f,18.f, q * (1.0f + w.deltaY*0.6f));
+        p.setManualBandQ(hit,q);
+    }
     repaint();
 }
 // FIX (item 4): Delete/Backspace removes the currently selected manual-EQ node (see mouseDown,
