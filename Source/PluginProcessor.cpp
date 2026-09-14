@@ -36,7 +36,12 @@ void PQAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
     // signal into L vs 0, i.e. an artificial side signal equal to half the mid content.
     const bool trueMono = getTotalNumInputChannels()<=1;
     float inSum=0,outSum=0;
-    const bool sOn=stereoOn.load(), mOn=midOn.load(), sdOn=sideOn.load();
+    // FIX (bug #1/#2): stereoOn/midOn/sideOn are now PURELY a display concern (which curve the
+    // analyzer draws - see PluginEditor::paint). They must never again gate what the audio itself
+    // does: Mid/Side used to be hard-zeroed here when their button was off, and since Stereo has no
+    // signal of its own (it only corrects the already-recombined L/R), "soloing" Stereo by turning
+    // Mid+Side off left it correcting silence - exactly the reported "input but no output" bug.
+    // Mid, Side, and Stereo correction now always run, unconditionally, regardless of button state.
     const float widthAmt=juce::jlimit(0.f,1.f,widthAmount.load());
     const float widthDep=widthDepth.load();
     const WidthMode wMode=widthMode.load();
@@ -82,42 +87,26 @@ void PQAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
         // Mid muted but Side/Stereo still need up-to-date correction), so this now runs unconditionally
         // instead of only inside the old "no solo" branch.
         if(dirty.exchange(false)) rebuildCoefficients();
-        if(mOn){
-            for(int k=0;k<kBands;++k) m=process(midCoeff[k],stMid[k],m);
-            // Manual bands targeting Mid: applied to the Mid leg only, before it's folded back into
-            // L/R, so they never leak into the Side signal.
-            for(int mbI=0;mbI<kMaxManualBands;++mbI){
-                auto& band=manualBands[(size_t)mbI]; if(!band.active.load()||band.target.load()!=ManualTarget::Mid) continue;
-                m=process(manualCoeff[(size_t)mbI],manualStateMid[(size_t)mbI],m);
-            }
-        } else {
-            // Muted: this leg contributes nothing to the recombined L/R, which is what lets Mid and
-            // Side be isolated independently (or together) instead of only as an exclusive solo.
-            m=0.f;
+        // Mid: correction + any manual bands targeting Mid always run now (see FIX note above).
+        for(int k=0;k<kBands;++k) m=process(midCoeff[k],stMid[k],m);
+        for(int mbI=0;mbI<kMaxManualBands;++mbI){
+            auto& band=manualBands[(size_t)mbI]; if(!band.active.load()||band.target.load()!=ManualTarget::Mid) continue;
+            m=process(manualCoeff[(size_t)mbI],manualStateMid[(size_t)mbI],m);
         }
-        if(sdOn){
-            for(int k=0;k<kBands;++k) s=process(sideCoeff[k],stSide[k],s);
-            // Manual bands targeting Side: same idea, on the Side leg only.
-            for(int mbI=0;mbI<kMaxManualBands;++mbI){
-                auto& band=manualBands[(size_t)mbI]; if(!band.active.load()||band.target.load()!=ManualTarget::Side) continue;
-                s=process(manualCoeff[(size_t)mbI],manualStateSide[(size_t)mbI],s);
-            }
-        } else {
-            s=0.f;
+        // Side: same.
+        for(int k=0;k<kBands;++k) s=process(sideCoeff[k],stSide[k],s);
+        for(int mbI=0;mbI<kMaxManualBands;++mbI){
+            auto& band=manualBands[(size_t)mbI]; if(!band.active.load()||band.target.load()!=ManualTarget::Side) continue;
+            s=process(manualCoeff[(size_t)mbI],manualStateSide[(size_t)mbI],s);
         }
         L=m+s; R=m-s;
-        if(sOn){
-            // Stereo has no raw content of its own - it's the final stage on the already-recombined
-            // L/R - so "off" bypasses this stage entirely rather than muting the output.
-            for(int k=0;k<kBands;++k){L=process(stereoCoeff[k],stStereoL[k],L); R=process(stereoCoeff[k],stStereoR[k],R);}
-            if(widthPost) applyWidth(L,R);
-            // Manual bands targeting Stereo: the final stage, applied identically (same
-            // coefficients, independent per-channel state) to both channels so it never introduces width.
-            for(int mbI=0;mbI<kMaxManualBands;++mbI){
-                auto& band=manualBands[(size_t)mbI]; if(!band.active.load()||band.target.load()!=ManualTarget::Stereo) continue;
-                L=process(manualCoeff[(size_t)mbI],manualStateL[(size_t)mbI],L);
-                R=process(manualCoeff[(size_t)mbI],manualStateR[(size_t)mbI],R);
-            }
+        // Stereo: final stage on the recombined L/R - also always runs now.
+        for(int k=0;k<kBands;++k){L=process(stereoCoeff[k],stStereoL[k],L); R=process(stereoCoeff[k],stStereoR[k],R);}
+        if(widthPost) applyWidth(L,R);
+        for(int mbI=0;mbI<kMaxManualBands;++mbI){
+            auto& band=manualBands[(size_t)mbI]; if(!band.active.load()||band.target.load()!=ManualTarget::Stereo) continue;
+            L=process(manualCoeff[(size_t)mbI],manualStateL[(size_t)mbI],L);
+            R=process(manualCoeff[(size_t)mbI],manualStateR[(size_t)mbI],R);
         }
         L*=outGain; R*=outGain;
         b.setSample(0,i,L); if(ch>1)b.setSample(1,i,R); outSum += .5f*(L*L+R*R);
@@ -367,7 +356,9 @@ bool PQAudioProcessor::applyStateBlock(const void* data,int size){
         }
     }
     manualDirty.store(true);
-    stereoOn.store(true); midOn.store(true); sideOn.store(true);
+    // FIX: these are display-only now (see header) and were being forced back to "true" on every
+    // state load regardless of what the user last had checked. Leave them as whatever they already
+    // are - since they're not written/read in this state block, that's simply their pre-load value.
     applyMatch();
     return true;
 }
