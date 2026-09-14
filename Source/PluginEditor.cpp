@@ -14,16 +14,18 @@ juce::Colour manualTargetColour(PQAudioProcessor::ManualTarget t){
 }
 }
 
-// ---- PresetPanel (item 6) ----------------------------------------------------------------------
+// ---- PresetPanel (restructured - see header comment) --------------------------------------------
 juce::File PresetPanel::presetDir(){
     auto dir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("PQ Presets");
     if(!dir.isDirectory()) dir.createDirectory();
     return dir;
 }
-PresetPanel::PresetPanel(PQAudioProcessor& proc):p(proc){
+PresetPanel::PresetPanel(PQAudioProcessor& proc, juce::ComboBox& listRef):p(proc),list(listRef){
     setOpaque(true);
-    addAndMakeVisible(title); title.setColour(juce::Label::textColourId, white()); title.setFont(juce::FontOptions(13).withStyle("bold"));
-    addAndMakeVisible(list); list.setTextWhenNothingSelected("Select a preset to load...");
+    addAndMakeVisible(title); title.setColour(juce::Label::textColourId, white()); title.setFont(juce::FontOptions(12).withStyle("bold"));
+    // `list` now lives in the main editor header (always visible there) - this panel doesn't add it
+    // as a child or set its bounds, just wires the load behaviour onto it.
+    list.setTextWhenNothingSelected("Select a preset...");
     list.onChange=[this]{
         auto name=list.getText(); if(name.isEmpty()) return;
         auto f=presetDir().getChildFile(name+".pqref");
@@ -89,11 +91,11 @@ void PresetPanel::paint(juce::Graphics& g){
     g.setColour(grid()); g.drawRect(getLocalBounds(),1);
 }
 void PresetPanel::resized(){
+    // FIX (preset restructure): no more `list` row here - it's a permanent header control now, this
+    // panel is purely name/save/delete.
     auto a=getLocalBounds().reduced(10);
     title.setBounds(a.removeFromTop(20));
     closeBtn.setBounds(getLocalBounds().getRight()-28,4,24,20);
-    a.removeFromTop(6);
-    list.setBounds(a.removeFromTop(26));
     a.removeFromTop(10);
     nameBox.setBounds(a.removeFromTop(26));
     a.removeFromTop(8);
@@ -103,9 +105,11 @@ void PresetPanel::resized(){
     deleteBtn.setBounds(row);
 }
 
-PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcessorEditor(&x),p(x),presetPanel(x){setResizable(true,true);setSize(1180,760);
+PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcessorEditor(&x),p(x),presetPanel(x,presetList){setResizable(true,true);setSize(1320,760);
  setWantsKeyboardFocus(true); // FIX (item 4): needed so this component (not a child control) receives Delete/Backspace
- setupButton(stereo,white());setupButton(mid,yellow());setupButton(side,blue());for(auto*q:{&capture,&apply,&clear})setupButton(*q,white());
+ for(auto*t:{&stereo,&mid,&side}) addAndMakeVisible(*t);
+ stereo.setDotColour(white()); mid.setDotColour(yellow()); side.setDotColour(blue());
+ for(auto*q:{&capture,&apply,&clear})setupButton(*q,white());
  setupButton(widthStage,white()); widthStage.setButtonText(p.widthPostEq.load()?"POST":"PRE");
  // Toggles whether the mono-widener runs before the EQ correction (PRE, so the analyzer/match
  // "hears" the widened signal) or after it (POST, widening is the very last step on the output).
@@ -156,10 +160,16 @@ PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcesso
  mode.addItem("MICRO SHIFT",1);mode.addItem("HAAS",2);mode.addItem("DECORRELATED",3);mode.setSelectedId((int)p.widthMode.load()+1);mode.onChange=[this]{p.widthMode=(PQAudioProcessor::WidthMode)(mode.getSelectedId()-1);p.presetDirty.store(true);};
  capture.onClick=[this]{p.captureReference();status.setText("REFERENCE CAPTURED",juce::dontSendNotification);};apply.onClick=[this]{p.applyMatch();status.setText("MATCH UPDATED",juce::dontSendNotification);};clear.onClick=[this]{p.clearReference();status.setText("REFERENCE CLEARED",juce::dontSendNotification);};
 
- // FIX (item 6): SAVE/LOAD are gone from the bottom row. A single PRESETS button up top toggles a
- // small overlay (presetPanel) with the file list + Save/Delete - closer to how "professional"
- // plugins present preset browsing, and it stays out of the way (closed) until asked for.
- setupButton(presetsBtn,white());
+ // FIX (preset restructure): the list itself now sits permanently in the header (styled like a
+ // normal dropdown, not hidden behind a button) - picking a preset is a single click, same as any
+ // other combo box. The kebab icon next to it opens the small "manage" overlay (rename-less for now,
+ // just name/save/delete) only when you actually need it.
+ addAndMakeVisible(presetList);
+ presetList.setColour(juce::ComboBox::backgroundColourId,panel());
+ presetList.setColour(juce::ComboBox::textColourId,white());
+ presetList.setColour(juce::ComboBox::outlineColourId,grid());
+ presetList.setColour(juce::ComboBox::arrowColourId,muted());
+ addAndMakeVisible(presetsBtn);
  presetsBtn.onClick=[this]{ presetPanel.setVisible(!presetPanel.isVisible()); if(presetPanel.isVisible()) presetPanel.toFront(true); };
  presetPanel.onPresetLoaded=[this]{ syncControlsFromProcessor(); status.setText("PRESET LOADED",juce::dontSendNotification); };
  addChildComponent(presetPanel); // starts hidden
@@ -201,8 +211,9 @@ void PQAudioProcessorEditor::updateActiveTargetStack(PQAudioProcessor::ManualTar
 }
 
 void PQAudioProcessorEditor::refreshBandButtons(){
- auto style=[](juce::TextButton&b,juce::Colour c,bool on){ b.setColour(juce::TextButton::textColourOffId, on?c:dim()); b.setColour(juce::TextButton::textColourOnId, on?c:dim()); };
- style(stereo,white(),p.stereoOn.load()); style(mid,yellow(),p.midOn.load()); style(side,blue(),p.sideOn.load());
+ stereo.setToggleState(p.stereoOn.load(),juce::dontSendNotification); stereo.repaint();
+ mid.setToggleState(p.midOn.load(),juce::dontSendNotification); mid.repaint();
+ side.setToggleState(p.sideOn.load(),juce::dontSendNotification); side.repaint();
 }
 // Bypass reads as muted grey when off (matches the other header buttons) and switches to a warm
 // amber fill - not just text colour - when engaged, so it's unmistakable at a glance even from
@@ -234,6 +245,21 @@ void addSmoothedPoint(juce::Path& q, juce::Point<float> prev, juce::Point<float>
     juce::Point<float> mid=prev+(cur-prev)*0.5f;
     q.quadraticTo(prev,mid);
 }
+// FIX (glow request): soft colour-matched shadow filled beneath a line, fading to transparent over a
+// fixed distance below wherever the curve actually sits (not tied to the chart's absolute top/bottom -
+// that would make a curve near the bottom of the chart barely glow at all, since the fade would
+// already be mostly spent by the time it reached the line). `lineOnly` is the open stroke path for
+// the curve itself; this closes a copy of it down to `bottom` to get a fillable shape.
+void glowUnder(juce::Graphics& g, const juce::Path& lineOnly, float bottom, float left, float right, juce::Colour c, float alpha=0.22f, float maxFadeDistance=140.f){
+    juce::Path fillPath(lineOnly);
+    fillPath.lineTo(right,bottom);
+    fillPath.lineTo(left,bottom);
+    fillPath.closeSubPath();
+    auto bounds=fillPath.getBounds();
+    float fadeDist=juce::jmin(maxFadeDistance,bounds.getHeight());
+    juce::ColourGradient glow(c.withAlpha(alpha),0,bounds.getY(),c.withAlpha(0.f),0,bounds.getY()+fadeDist,false);
+    g.setGradientFill(glow); g.fillPath(fillPath);
+}
 }
 void PQAudioProcessorEditor::drawCurve(juce::Graphics&g,juce::Rectangle<float>r,const std::array<std::atomic<float>,PQAudioProcessor::kBins>&a,juce::Colour c){
  juce::Path q; juce::Point<float> prev;
@@ -244,6 +270,13 @@ void PQAudioProcessorEditor::drawCurve(juce::Graphics&g,juce::Rectangle<float>r,
      prev=cur;
  }
  q.lineTo(prev);
+ // FIX (glow + shadow request): a soft dark drop-shadow first (same DropShadow technique already
+ // used under the chart panel itself), offset slightly down so the line reads as "lifted" off the
+ // background, THEN the colour glow fill, THEN the line on top - shadow gives depth, glow gives
+ // colour, matching both effects the reference asked for stacked together.
+ juce::DropShadow curveShadow(juce::Colours::black.withAlpha(0.5f),9,juce::Point<int>(0,3));
+ curveShadow.drawForPath(g,q);
+ glowUnder(g,q,r.getBottom(),r.getX(),r.getRight(),c);
  g.setColour(c);g.strokePath(q,juce::PathStrokeType(1.8f));
 }
 void PQAudioProcessorEditor::drawRef(juce::Graphics&g,juce::Rectangle<float>r,const std::array<std::atomic<float>,PQAudioProcessor::kBins>&a,juce::Colour c){
@@ -398,6 +431,9 @@ void PQAudioProcessorEditor::drawManualEq(juce::Graphics& g){
             float x=freqToX(hz), y=gainDbToY((float)computeDb(target,hz));
             if(px==0) curve.startNewSubPath(x,y); else curve.lineTo(x,y);
         }
+        // FIX (glow request): same treatment as the live analyzer curves (see drawCurve/glowUnder),
+        // just a touch dimmer since this curve already sits on top of the analyzer's own glow.
+        glowUnder(g,curve,chartArea.getBottom(),chartArea.getX(),chartArea.getRight(),c,0.16f);
         g.setColour(c.withAlpha(0.85f)); g.strokePath(curve, juce::PathStrokeType(2.0f));
     };
     drawTargetCurve(MT::Stereo, manualStereoColour());
@@ -531,7 +567,25 @@ void PQAudioProcessorEditor::showAddBandMenu(juce::Point<float> chartPos, juce::
     });
 }
 
-void PQAudioProcessorEditor::paint(juce::Graphics&g){g.fillAll(bg());auto a=getLocalBounds().toFloat();g.setColour(white());g.setFont(juce::FontOptions(29).withStyle("bold"));g.drawText("PQ",28,20,62,32,juce::Justification::left);g.setFont(juce::FontOptions(10));g.setColour(muted());g.drawText("PERFECTION OF MATCH EQ   /   POURIA MOTABEAN",91,25,420,22,juce::Justification::left);
+void PQAudioProcessorEditor::paint(juce::Graphics&g){
+ // FIX (graphic redesign): flat black read as a bit lifeless next to the reference direction - a
+ // very subtle top-to-bottom gradient (barely lighter, cool-toned, at the top) gives the window a
+ // touch of depth without introducing any new bright colour into the palette.
+ juce::ColourGradient bgGrad(juce::Colour(0xff11151b),0,0,juce::Colour(0xff05060a),0,(float)getHeight(),false);
+ g.setGradientFill(bgGrad); g.fillRect(getLocalBounds());
+ auto a=getLocalBounds().toFloat();
+ // FIX (fonts request - "PQ" specifically): bumped a size, added letter-spacing (kerning), and a
+ // soft white-to-cool-blue gradient fill instead of flat white, so the wordmark reads a bit more
+ // like a designed logo and less like a plain bold label.
+ {
+     juce::Font pqFont(juce::FontOptions(34).withStyle("bold"));
+     pqFont=pqFont.withExtraKerningFactor(0.04f);
+     g.setFont(pqFont);
+     juce::ColourGradient pqGrad(white(),28,20,juce::Colour(0xffbfe0ff),28,52,false);
+     g.setGradientFill(pqGrad);
+     g.drawText("PQ",28,18,66,36,juce::Justification::left);
+ }
+ g.setFont(juce::FontOptions(10).withExtraKerningFactor(0.02f));g.setColour(muted());g.drawText("PERFECTION OF MATCH EQ   /   POURIA MOTABEAN",91,25,420,22,juce::Justification::left);
  auto chart=a.reduced(24,72).withHeight(a.getHeight()*.48f);
  // Drop shadow under the analyzer panel, drawn before the panel itself so the panel sits on top of it.
  {
@@ -590,25 +644,25 @@ void PQAudioProcessorEditor::paint(juce::Graphics&g){g.fillAll(bg());auto a=getL
  label(g,"STATUS",{(float)(a.getRight()-320),(float)y+190-16,100,14},muted());
 }
 void PQAudioProcessorEditor::resized(){auto a=getLocalBounds();
- // FIX (item 6): PRESETS sits left of STEREO/MID/SIDE at the top, matching where a "professional"
- // plugin's preset browser button usually lives.
- // FIX (item 2/3): the three show/hide dots now sit inline on the header row, just left of PRESETS,
- // instead of stacked directly under STEREO/MID/SIDE where they were easy to miss-click against the
- // button above. No text needed - colour (white/yellow/blue) says which target each one is.
+ // FIX (preset restructure): the preset dropdown + kebab now live on the LEFT of the header, right
+ // after the PQ/title text - matching where a "Default v" preset picker normally sits, and well
+ // clear of the STEREO/MID/SIDE cluster which stays anchored to the right.
+ presetList.setBounds(540,18,190,36);
+ presetsBtn.setBounds(540+190+8,18,36,36);
+ // FIX (item 2/3): the three show/hide dots sit inline on the header row, to the left of the
+ // STEREO/MID/SIDE group. No text needed - colour (white/yellow/blue) says which target each one is.
  {
      constexpr int dot=18, gap=8, groupW=dot*3+gap*2;
-     int presetsX=a.getRight()-403;
-     int groupLeft=presetsX-12-groupW;
+     int groupLeft=(a.getRight()-305)-12-groupW;
      int dotY=18+(36-dot)/2;
      stereoEqToggle.setBounds(groupLeft,dotY,dot,dot);
      midEqToggle.setBounds(groupLeft+dot+gap,dotY,dot,dot);
      sideEqToggle.setBounds(groupLeft+2*(dot+gap),dotY,dot,dot);
-     // Bypass sits further left again, in the open header space between the title and this group -
-     // it's the button an engineer reaches for first, so it gets its own clearly separate spot
-     // rather than being squeezed in next to the small visibility dots.
+     // Bypass sits further left again, in the open header space - it's the button an engineer
+     // reaches for first, so it gets its own clearly separate spot rather than being squeezed in
+     // next to the small visibility dots.
      bypass.setBounds(groupLeft-12-90,18,90,36);
  }
- presetsBtn.setBounds(a.getRight()-403,18,90,36);
  stereo.setBounds(a.getRight()-305,18,90,36);mid.setBounds(a.getRight()-207,18,90,36);side.setBounds(a.getRight()-109,18,90,36);
  auto chart=a.reduced(24,72).withHeight(a.getHeight()*.48f);int y=chart.getBottom()+70;sAmt.setBounds(145,y,470,22);mAmt.setBounds(145,y+32,470,22);siAmt.setBounds(145,y+64,470,22);low.setBounds(700,y+18,185,22);high.setBounds(900,y+18,185,22);
  inputMeterArea={700.f,(float)(y+62),70.f,108.f}; outputMeterArea={900.f,(float)(y+62),70.f,108.f};
@@ -616,8 +670,8 @@ void PQAudioProcessorEditor::resized(){auto a=getLocalBounds();
  matchGainBtn.setBounds(785,y+101,100,30);
  mode.setBounds(210,y+115,180,25);width.setBounds(410,y+115,250,25);widthStage.setBounds(210,y+147,90,25);depth.setBounds(410,y+147,250,25);capture.setBounds(42,y+190,90,30);apply.setBounds(140,y+190,80,30);clear.setBounds(230,y+190,75,30);
  status.setBounds(a.getRight()-320,y+190,300,30);
- // FIX (item 6): preset overlay - anchored top-right under the header buttons. It's only visible
- // while PRESETS is toggled on, so briefly covering part of the analyzer chart while browsing/
- // saving presets is expected (same as most plugins' preset browsers).
- presetPanel.setBounds(a.getRight()-403,60,384,230);
+ // FIX (preset restructure): overlay now anchored under the preset list/kebab on the LEFT, where
+ // those controls actually live - and shrunk (no more list row inside it) to just fit name/save/
+ // delete. Still only visible while the kebab is toggled on.
+ presetPanel.setBounds(540,60,300,150);
 }
