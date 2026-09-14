@@ -135,6 +135,14 @@ public:
     // normally while bypassed, so you can still watch the match curve while listening dry.
     std::atomic<bool> bypassed{false};
     std::atomic<bool> hasReference{false};
+    // I1: CAPTURE now averages over a short window instead of grabbing one instantaneous frame, so a
+    // single loud transient or a quiet gap doesn't skew the reference. capturingReference/
+    // captureProgress are read by the editor (to disable the button and show a percentage);
+    // captureDurationSec is fixed (not user-exposed yet) but kept as a named atomic rather than a
+    // magic number in case that changes later.
+    std::atomic<bool> capturingReference{false};
+    std::atomic<float> captureProgress{0.f}; // 0..1
+    std::atomic<float> captureDurationSec{5.f};
     std::array<std::atomic<float>,kBins> stereoCurve{},midCurve{},sideCurve{};
     // FIX (crash-risk #2): reference arrays are now atomic (were plain float[] before) because the
     // UI thread writes them on Capture/Load/state-restore while the audio thread reads them every
@@ -169,6 +177,11 @@ private:
     // updates. fftPos is the write cursor (wraps continuously); hopCounter times the analysis calls.
     std::array<float,kFFTSize> fftMid{},fftSide{}; int fftPos=0; int hopCounter=0;
     std::array<float,kBins> liveStereo{},liveMid{},liveSide{};
+    // I1: power-domain accumulators for the averaging capture - only ever touched by the analysis
+    // thread (same ownership as fftMid/fftSide/liveStereo above), reset the moment that thread
+    // notices capturingReference flip from false to true (see captureWasActive in analyzeAndUpdate()).
+    std::array<double,kBins> captureAccumStereo{},captureAccumMid{},captureAccumSide{};
+    int captureFrameCount=0; double captureElapsedSec=0.0; bool captureWasActive=false;
     // FIX (B1): these move from a plain float array to atomic - they're built by buildCorrection()
     // which now runs on the background analysis thread, but read by rebuildCoefficients() on the
     // audio thread whenever `dirty` is set. Same reasoning as refStereo/refMid/refSide above.
