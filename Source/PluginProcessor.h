@@ -92,6 +92,12 @@ public:
     int getNumPrograms() override{return 1;} int getCurrentProgram() override{return 0;} void setCurrentProgram(int) override{} const juce::String getProgramName(int) override{return{};} void changeProgramName(int,const juce::String&) override{}
     void getStateInformation(juce::MemoryBlock&) override; void setStateInformation(const void*,int) override;
     void captureReference(); void clearReference(); bool saveReference(const juce::File&); bool loadReference(const juce::File&); void applyMatch();
+    // I2: a reference curve on its own, separate from the full preset (no manual EQ, width, or match
+    // amounts) - for handing a captured target to someone else, or between your own projects, without
+    // dragging every other setting along with it. Own file format/extension (.pqmatch) so it can never
+    // be confused with or accidentally opened as a full .pqref preset.
+    bool exportReferenceOnly(const juce::File&);
+    bool importReferenceOnly(const juce::File&);
 
     std::atomic<float> stereoMatch{0},midMatch{0},sideMatch{0};
     std::atomic<float> lowHz{20},highHz{20000},maxCorrectionDb{6},smoothingOctaves{0.35f};
@@ -103,6 +109,12 @@ public:
     // processed output sits at the same average level as the input - a quick way to A/B the tonal
     // change (EQ, width) without the comparison being biased by a loudness difference.
     std::atomic<float> inputTrimDb{0.f}, outputTrimDb{0.f};
+    // I3: which pair of meters matchGain() reads. Peak (default) neutralizes a peak-level change the
+    // EQ/width introduced - the most direct "make it fair to A/B" comparison. Rms instead matches
+    // average perceived loudness, which is what most people actually mean by "same volume" when the
+    // material isn't peaky (e.g. already-limited masters where the peak barely moves either way).
+    enum class GainMatchMode { Peak, Rms };
+    std::atomic<GainMatchMode> gainMatchMode{GainMatchMode::Peak};
     void matchGain();
     // Whether the mono-widener runs before the EQ correction (so the analyzer/match "sees" the
     // widened signal) or after it (so widening is the last thing applied to the final output).
