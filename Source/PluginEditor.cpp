@@ -585,7 +585,7 @@ void PQAudioProcessorEditor::paint(juce::Graphics&g){
      g.setGradientFill(pqGrad);
      g.drawText("PQ",28,18,66,36,juce::Justification::left);
  }
- g.setFont(juce::FontOptions(10).withExtraKerningFactor(0.02f));g.setColour(muted());g.drawText("PERFECTION OF MATCH EQ   /   POURIA MOTABEAN",91,25,420,22,juce::Justification::left);
+ g.setFont(juce::Font(juce::FontOptions(10)).withExtraKerningFactor(0.02f));g.setColour(muted());g.drawText("PERFECTION OF MATCH EQ   /   POURIA MOTABEAN",91,25,420,22,juce::Justification::left);
  auto chart=a.reduced(24,72).withHeight(a.getHeight()*.48f);
  // Drop shadow under the analyzer panel, drawn before the panel itself so the panel sits on top of it.
  {
