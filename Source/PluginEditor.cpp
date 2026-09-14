@@ -714,7 +714,7 @@ void PQAudioProcessorEditor::resized(){auto a=getLocalBounds();
      mp.removeFromBottom(18.f); // room for the live-level numbers drawn in paint()
      float gap=12.f, barW=(mp.getWidth()-gap)/2.f;
      auto inBar=mp.removeFromLeft(barW); mp.removeFromLeft(gap); auto outBar=mp;
-     inputMeterArea=inBar; outputMeterArea=outBar;
+     inputMeterArea=inBar.toFloat(); outputMeterArea=outBar.toFloat();
      inputTrim.setBounds(inputMeterArea.toNearestInt()); outputTrim.setBounds(outputMeterArea.toNearestInt());
      matchGainBtn.setBounds(btnRow.toNearestInt());
  }
