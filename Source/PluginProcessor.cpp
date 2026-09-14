@@ -100,7 +100,21 @@ void PQAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
             s=process(manualCoeff[(size_t)mbI],manualStateSide[(size_t)mbI],s);
         }
         L=m+s; R=m-s;
-        // Stereo: final stage on the recombined L/R - also always runs now.
+        // FIX (this was the actual regression): Mid/Side correction always runs (both legs are
+        // always computed, so nothing is ever fully silenced) - but exactly ONE of Mid/Side being
+        // the only one "on" now isolates that component for monitoring, same as before. Any other
+        // combination (both on, both off, or relying on Stereo) plays the normal combined mix.
+        // Stereo's own button never mutes anything by itself - it only ever affects which curve is
+        // drawn (see PluginEditor::paint) - so "solo Stereo" (Mid+Side both off) now correctly means
+        // "just play the normal mix", not silence.
+        {
+            const bool soloMid = midOn.load() && !sideOn.load();
+            const bool soloSide = sideOn.load() && !midOn.load();
+            if (soloMid) { L = m; R = m; }
+            else if (soloSide) { L = s; R = -s; }
+            // else: L,R already hold the normal m+s / m-s combination from above.
+        }
+        // Stereo: final stage on the recombined L/R - always runs regardless of solo state above.
         for(int k=0;k<kBands;++k){L=process(stereoCoeff[k],stStereoL[k],L); R=process(stereoCoeff[k],stStereoR[k],R);}
         if(widthPost) applyWidth(L,R);
         for(int mbI=0;mbI<kMaxManualBands;++mbI){
