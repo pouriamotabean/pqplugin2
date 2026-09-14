@@ -1,5 +1,8 @@
 #include "PluginEditor.h"
 namespace {juce::Colour white(){return juce::Colour(0xfff2f4f7);} juce::Colour yellow(){return juce::Colour(0xffffcf3f);} juce::Colour blue(){return juce::Colour(0xff55a8ff);} juce::Colour bg(){return juce::Colour(0xff07090c);} juce::Colour panel(){return juce::Colour(0xff101419);} juce::Colour grid(){return juce::Colour(0xff242a31);} juce::Colour muted(){return juce::Colour(0xff737e89);} juce::Colour dim(){return juce::Colour(0xff3a4148);}
+// Bypass indicator colour - a warm amber, distinct from the STEREO/MID/SIDE palette, so an engaged
+// bypass reads unambiguously as "something's different" rather than blending in with everything else.
+juce::Colour bypassColour(){return juce::Colour(0xffff9a3f);}
 // Manual-EQ per-target colours (item 2): distinct from, but recognisably related to, the
 // STEREO/MID/SIDE button colours above, so a glance at a node/curve tells you which signal it sits on.
 juce::Colour manualStereoColour(){return juce::Colour(0xffc7cdd3);} // off-white/grey, family with white()
@@ -161,6 +164,12 @@ PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcesso
  presetPanel.onPresetLoaded=[this]{ syncControlsFromProcessor(); status.setText("PRESET LOADED",juce::dontSendNotification); };
  addChildComponent(presetPanel); // starts hidden
 
+ // Simple true-bypass toggle - deliberately not persisted (see PQAudioProcessor::bypassed), so it
+ // always opens un-bypassed regardless of what preset/session is loaded.
+ setupButton(bypass,white());
+ bypass.onClick=[this]{ p.bypassed.store(!p.bypassed.load()); refreshBypassButton(); };
+ refreshBypassButton();
+
  addAndMakeVisible(mode);addAndMakeVisible(status);status.setColour(juce::Label::textColourId,muted());status.setJustificationType(juce::Justification::centredRight);startTimerHz(20);
 }
 PQAudioProcessorEditor::~PQAudioProcessorEditor(){ setLookAndFeel(nullptr); }
@@ -195,13 +204,24 @@ void PQAudioProcessorEditor::refreshBandButtons(){
  auto style=[](juce::TextButton&b,juce::Colour c,bool on){ b.setColour(juce::TextButton::textColourOffId, on?c:dim()); b.setColour(juce::TextButton::textColourOnId, on?c:dim()); };
  style(stereo,white(),p.stereoOn.load()); style(mid,yellow(),p.midOn.load()); style(side,blue(),p.sideOn.load());
 }
+// Bypass reads as muted grey when off (matches the other header buttons) and switches to a warm
+// amber fill - not just text colour - when engaged, so it's unmistakable at a glance even from
+// across a room, the way a hardware bypass switch's LED would be.
+void PQAudioProcessorEditor::refreshBypassButton(){
+ bool on=p.bypassed.load();
+ bypass.setColour(juce::TextButton::buttonColourId, on?bypassColour():panel());
+ bypass.setColour(juce::TextButton::textColourOffId, on?juce::Colours::black:muted());
+ bypass.setColour(juce::TextButton::textColourOnId, on?juce::Colours::black:muted());
+ bypass.repaint();
+}
 
 void PQAudioProcessorEditor::setupButton(juce::TextButton&b,juce::Colour c){addAndMakeVisible(b);b.setColour(juce::TextButton::buttonColourId,panel());b.setColour(juce::TextButton::buttonOnColourId,grid());b.setColour(juce::TextButton::textColourOffId,c);b.setColour(juce::TextButton::textColourOnId,c);}
 void PQAudioProcessorEditor::setupSlider(juce::Slider&s,double a,double b,double step){addAndMakeVisible(s);s.setSliderStyle(juce::Slider::LinearHorizontal);s.setTextBoxStyle(juce::Slider::TextBoxRight,false,66,20);s.setRange(a,b,step);s.setColour(juce::Slider::thumbColourId,white());s.setColour(juce::Slider::trackColourId,grid());s.setColour(juce::Slider::textBoxTextColourId,white());s.setColour(juce::Slider::textBoxBackgroundColourId,panel());}
 // Thin vertical trim fader meant to sit directly on top of drawVerticalMeter() for the same
 // rectangle: no text box, transparent track (the meter bar underneath already reads as the track),
-// small bright thumb marking the trim position so it doesn't fight visually with the level bar.
-void PQAudioProcessorEditor::setupVerticalTrim(juce::Slider&s){addAndMakeVisible(s);s.setSliderStyle(juce::Slider::LinearVertical);s.setTextBoxStyle(juce::Slider::NoTextBox,false,0,0);s.setColour(juce::Slider::thumbColourId,yellow());s.setColour(juce::Slider::trackColourId,juce::Colours::transparentBlack);s.setColour(juce::Slider::backgroundColourId,juce::Colours::transparentBlack);}
+// a slim pale marker for the thumb - just enough to find and drag, without reading as its own
+// separate control competing with the level bar for attention.
+void PQAudioProcessorEditor::setupVerticalTrim(juce::Slider&s){addAndMakeVisible(s);s.setSliderStyle(juce::Slider::LinearVertical);s.setTextBoxStyle(juce::Slider::NoTextBox,false,0,0);s.setColour(juce::Slider::thumbColourId,juce::Colours::white.withAlpha(0.55f));s.setColour(juce::Slider::trackColourId,juce::Colours::transparentBlack);s.setColour(juce::Slider::backgroundColourId,juce::Colours::transparentBlack);}
 void PQAudioProcessorEditor::label(juce::Graphics&g,juce::String t,juce::Rectangle<float>r,juce::Colour c){g.setColour(c);g.setFont(juce::FontOptions(10));g.drawText(t,r,juce::Justification::left);}
 namespace {
 // FIX (low-end still looked steppy after the FFT/averaging fixes): the path used to connect raw
@@ -254,39 +274,27 @@ void PQAudioProcessorEditor::drawRangeMask(juce::Graphics&g,juce::Rectangle<floa
 }
 
 // Minimal vertical bar meter for input/output level (-60dB..0dB mapped to the full height).
-// Kept monochrome/flat to match the rest of the panel, with a small colour shift only near the
-// very top of the range so it still reads as "hot" without introducing a busy gradient.
+// FIX ("ناب" cleanup): dropped the 0/-6/-12/-24/-40/-60 graduation ticks entirely - on a meter this
+// narrow they read as clutter more than a usable scale, and the live number already printed above/
+// below the bar (see paint()) gives the precise reading they were trying to provide. The flat fill
+// is replaced with a soft vertical gradient (dim at the bottom, full colour at the top) so the bar
+// itself looks less like a flat block and more like a proper level meter.
 void PQAudioProcessorEditor::drawVerticalMeter(juce::Graphics&g,juce::Rectangle<float>r,float levelDb,float peakDb,juce::Colour c){
- g.setColour(panel()); g.fillRoundedRectangle(r,4.f);
- g.setColour(grid()); g.drawRoundedRectangle(r,4.f,1.f);
+ g.setColour(panel()); g.fillRoundedRectangle(r,5.f);
+ g.setColour(grid()); g.drawRoundedRectangle(r,5.f,1.f);
  constexpr float kFloorDb=-60.f;
  float t=juce::jlimit(0.f,1.f,(levelDb-kFloorDb)/(0.f-kFloorDb));
- auto fillR=r.reduced(3.f); float fillH=fillR.getHeight()*t;
+ auto fillR=r.reduced(4.f); float fillH=fillR.getHeight()*t;
  auto bar=juce::Rectangle<float>(fillR.getX(),fillR.getBottom()-fillH,fillR.getWidth(),fillH);
- g.setColour(t>0.92f?yellow():c.withAlpha(.85f)); g.fillRoundedRectangle(bar,3.f);
+ juce::ColourGradient grad(c.withAlpha(.35f),bar.getX(),fillR.getBottom(),
+                            t>0.92f?yellow():c.withAlpha(.95f),bar.getX(),fillR.getY(),false);
+ g.setGradientFill(grad); g.fillRoundedRectangle(bar,4.f);
  // Peak-hold indicator: a thin line at the highest recent peak, which the processor releases
  // slowly rather than snapping straight to the current level (see PQAudioProcessor::processBlock).
  float tp=juce::jlimit(0.f,1.f,(peakDb-kFloorDb)/(0.f-kFloorDb));
  float py=fillR.getBottom()-fillR.getHeight()*tp;
- g.setColour(juce::Colours::white.withAlpha(.9f));
- g.fillRect(juce::Rectangle<float>(fillR.getX(),py-1.f,fillR.getWidth(),2.f));
- // FIX (item 1): dB graduation marks down the meter, like a measuring cylinder, so the bar reads as
- // an actual scale instead of a plain unlabeled fill. Ticks at 0/-6/-12/-24/-40/-60dB; only the
- // outermost two get a printed number (0 and the floor) to keep the narrow meter from looking busy,
- // the rest are just short tick lines.
- static const float ticks[]={0.f,-6.f,-12.f,-24.f,-40.f,-60.f};
- g.setFont(juce::FontOptions(7.5f));
- for(float db:ticks){
-     float tt=juce::jlimit(0.f,1.f,(db-kFloorDb)/(0.f-kFloorDb));
-     float y=fillR.getBottom()-fillR.getHeight()*tt;
-     g.setColour(juce::Colours::black.withAlpha(0.55f));
-     g.fillRect(juce::Rectangle<float>(fillR.getX(),y-0.5f,fillR.getWidth()*0.32f,1.f));
-     g.fillRect(juce::Rectangle<float>(fillR.getRight()-fillR.getWidth()*0.32f,y-0.5f,fillR.getWidth()*0.32f,1.f));
-     if(db==0.f||db==-60.f){
-         g.setColour(muted());
-         g.drawText(juce::String((int)db),r.getRight()+2.f,y-5.f,20.f,10.f,juce::Justification::left);
-     }
- }
+ g.setColour(juce::Colours::white.withAlpha(.85f));
+ g.fillRect(juce::Rectangle<float>(fillR.getX(),py-0.75f,fillR.getWidth(),1.5f));
 }
 
 void PQAudioProcessorEditor::drawFreqDbAxis(juce::Graphics& g, juce::Rectangle<float> chart){
@@ -565,17 +573,17 @@ void PQAudioProcessorEditor::paint(juce::Graphics&g){g.fillAll(bg());auto a=getL
  label(g,"MODE",{210,(float)y+100,100,18},muted()); label(g,"WIDTH AMT",{410,(float)y+100,100,18},muted()); label(g,"STAGE",{210,(float)y+132,100,18},muted()); label(g,"DEPTH %",{410,(float)y+132,100,18},muted());
  // Input/output level meters (each doubling as a trim fader - see setupVerticalTrim) plus the
  // MATCH GAIN button sitting between them, replacing the old Max dB / Smoothing sliders here.
- // FIX (item 3): the bar/peak-line alone wasn't enough to read an exact value at a glance, so the
- // live level now also prints as a small number above each meter (next to IN/OUT), in addition to
- // the trim value already printed below - both readouts sit outside the bar, as plain text.
- g.setFont(juce::FontOptions(9)); g.setColour(muted());
- g.drawText("IN  "+juce::String(p.inputRmsDb.load(),1)+"dB",inputMeterArea.withY(inputMeterArea.getY()-16).withHeight(14),juce::Justification::centred);
- g.drawText("OUT  "+juce::String(p.outputRmsDb.load(),1)+"dB",outputMeterArea.withY(outputMeterArea.getY()-16).withHeight(14),juce::Justification::centred);
+ // FIX ("ناب" cleanup): one label above (just "IN"/"OUT"), one number below (the live level) - the
+ // separate always-on TRIM readout is gone; the fader thumb's position on the bar already shows the
+ // trim, and this halves the amount of small text crowding the two meters.
+ g.setFont(juce::FontOptions(9).withStyle("bold")); g.setColour(muted());
+ g.drawText("IN",inputMeterArea.withY(inputMeterArea.getY()-16).withHeight(14),juce::Justification::centred);
+ g.drawText("OUT",outputMeterArea.withY(outputMeterArea.getY()-16).withHeight(14),juce::Justification::centred);
  drawVerticalMeter(g,inputMeterArea,p.inputRmsDb.load(),p.inputPeakDb.load(),white());
  drawVerticalMeter(g,outputMeterArea,p.outputRmsDb.load(),p.outputPeakDb.load(),blue());
- g.setColour(muted()); g.setFont(juce::FontOptions(8));
- g.drawText("TRIM "+juce::String(p.inputTrimDb.load(),1)+"dB",inputMeterArea.withY(inputMeterArea.getBottom()+2).withHeight(12),juce::Justification::centred);
- g.drawText("TRIM "+juce::String(p.outputTrimDb.load(),1)+"dB",outputMeterArea.withY(outputMeterArea.getBottom()+2).withHeight(12),juce::Justification::centred);
+ g.setColour(white()); g.setFont(juce::FontOptions(10));
+ g.drawText(juce::String(p.inputRmsDb.load(),1),inputMeterArea.withY(inputMeterArea.getBottom()+3).withHeight(14),juce::Justification::centred);
+ g.drawText(juce::String(p.outputRmsDb.load(),1),outputMeterArea.withY(outputMeterArea.getBottom()+3).withHeight(14),juce::Justification::centred);
  // FIX (item 7): "GAIN MATCHED"/etc used to float in the corner with nothing to explain it. It's a
  // shared status line for CAPTURE/APPLY/CLEAR/SAVE/LOAD/MATCH GAIN feedback, so give it a caption
  // instead of removing the (still useful) shared line.
@@ -595,6 +603,10 @@ void PQAudioProcessorEditor::resized(){auto a=getLocalBounds();
      stereoEqToggle.setBounds(groupLeft,dotY,dot,dot);
      midEqToggle.setBounds(groupLeft+dot+gap,dotY,dot,dot);
      sideEqToggle.setBounds(groupLeft+2*(dot+gap),dotY,dot,dot);
+     // Bypass sits further left again, in the open header space between the title and this group -
+     // it's the button an engineer reaches for first, so it gets its own clearly separate spot
+     // rather than being squeezed in next to the small visibility dots.
+     bypass.setBounds(groupLeft-12-90,18,90,36);
  }
  presetsBtn.setBounds(a.getRight()-403,18,90,36);
  stereo.setBounds(a.getRight()-305,18,90,36);mid.setBounds(a.getRight()-207,18,90,36);side.setBounds(a.getRight()-109,18,90,36);
