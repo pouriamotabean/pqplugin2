@@ -140,7 +140,7 @@ PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcesso
  for(auto*t:{&stereo,&mid,&side}) addAndMakeVisible(*t);
  stereo.setDotColour(white()); mid.setDotColour(yellow()); side.setDotColour(blue());
  for(auto*q:{&capture,&apply,&clear})setupButton(*q,white());
- capture.setTooltip("Capture the current live spectrum as the reference target to match against.");
+ capture.setTooltip("Capture a 5-second running average of the live spectrum as the reference target to match against.");
  apply.setTooltip("Recompute the correction curve for the currently checked target(s) from the captured reference.");
  clear.setTooltip("Discard the captured reference and remove all automatic correction.");
  setupButton(widthStage,white()); widthStage.setButtonText(p.widthPostEq.load()?"POST":"PRE");
@@ -181,7 +181,12 @@ PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcesso
  sAmt.setTooltip("How strongly the captured reference corrects the Stereo signal, 0-100%.");
  mAmt.setTooltip("How strongly the captured reference corrects the Mid signal, 0-100%.");
  siAmt.setTooltip("How strongly the captured reference corrects the Side signal, 0-100%.");
+ // Fader glow (per earlier request): track lights up from the left as you drag right, in each
+ // slider's own colour where one exists (Stereo/Mid/Side), or a neutral accent otherwise.
+ glowWhite.setGlowColour(white()); glowYellow.setGlowColour(yellow()); glowBlue.setGlowColour(blue()); glowAccent.setGlowColour(juce::Colour(0xffbfe0ff));
+ sAmt.setLookAndFeel(&glowWhite); mAmt.setLookAndFeel(&glowYellow); siAmt.setLookAndFeel(&glowBlue);
  setupSlider(low,20,20000,1);setupSlider(high,20,20000,1);setupSlider(width,0,100,.1);setupSlider(depth,0,200,1);
+ for(auto*s:{&low,&high,&width,&depth}) s->setLookAndFeel(&glowAccent);
  low.setTooltip("Correction is only applied above this frequency.");
  high.setTooltip("Correction is only applied below this frequency.");
  width.setTooltip("How much of the mono-widener effect to blend in, 0-100%.");
@@ -218,7 +223,7 @@ PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcesso
  };
  mode.addItem("MICRO SHIFT",1);mode.addItem("HAAS",2);mode.addItem("DECORRELATED",3);mode.setSelectedId((int)p.widthMode.load()+1);mode.onChange=[this]{p.widthMode=(PQAudioProcessor::WidthMode)(mode.getSelectedId()-1);p.presetDirty.store(true);};
  mode.setTooltip("How mono content is turned into stereo width: Micro Shift (subtle), Haas (delay-based), or Decorrelated (dual-tap, widest).");
- capture.onClick=[this]{p.captureReference();status.setText("REFERENCE CAPTURED",juce::dontSendNotification);};apply.onClick=[this]{p.applyMatch();status.setText("MATCH UPDATED",juce::dontSendNotification);};clear.onClick=[this]{p.clearReference();status.setText("REFERENCE CLEARED",juce::dontSendNotification);};
+ capture.onClick=[this]{p.captureReference();};apply.onClick=[this]{p.applyMatch();status.setText("MATCH UPDATED",juce::dontSendNotification);};clear.onClick=[this]{p.clearReference();status.setText("REFERENCE CLEARED",juce::dontSendNotification);};
 
  // FIX (preset restructure): the list itself now sits permanently in the header (styled like a
  // normal dropdown, not hidden behind a button) - picking a preset is a single click, same as any
@@ -245,7 +250,27 @@ PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcesso
 
  addAndMakeVisible(mode);addAndMakeVisible(status);status.setColour(juce::Label::textColourId,muted());status.setJustificationType(juce::Justification::centredRight);startTimerHz(20);
 }
-PQAudioProcessorEditor::~PQAudioProcessorEditor(){ setLookAndFeel(nullptr); }
+PQAudioProcessorEditor::~PQAudioProcessorEditor(){
+    for(auto*s:{&sAmt,&mAmt,&siAmt,&low,&high,&width,&depth}) s->setLookAndFeel(nullptr);
+    setLookAndFeel(nullptr);
+}
+
+// I1: reflect the background averaging capture (see PQAudioProcessor::captureReference/
+// analyzeAndUpdate) on the CAPTURE button itself - disabled + showing live progress while it runs,
+// so a second click can't restart/confuse an in-progress capture.
+void PQAudioProcessorEditor::timerCallback(){
+    bool capturing=p.capturingReference.load();
+    if(capturing){
+        capture.setEnabled(false);
+        capture.setButtonText("CAPTURING "+juce::String((int)(p.captureProgress.load()*100.f))+"%");
+    } else {
+        capture.setEnabled(true);
+        capture.setButtonText("CAPTURE");
+        if(wasCapturingLastFrame) status.setText("REFERENCE CAPTURED",juce::dontSendNotification);
+    }
+    wasCapturingLastFrame=capturing;
+    repaint();
+}
 
 // FIX (item 6): after a preset load, far more than just the reference curve may have changed
 // (manual EQ is read straight from the processor every paint, but the plain juce::Slider/ComboBox
@@ -709,16 +734,26 @@ void PQAudioProcessorEditor::paint(juce::Graphics&g){
      juce::ColourGradient panelGrad(juce::Colour(0xff141a22),ctrlPanel.getX(),ctrlPanel.getY(),juce::Colour(0xff0c0f14),ctrlPanel.getX(),ctrlPanel.getBottom(),false);
      g.setGradientFill(panelGrad); g.fillRoundedRectangle(ctrlPanel,14.f);
  }
- label(g,"MATCH AMOUNT",{42,chart.getBottom()+47,150,18},muted());label(g,"FREQUENCY RANGE",{700,chart.getBottom()+47,180,18},muted());
+ // FIX (layout balance): the two bottom columns are now computed as actual symmetric halves of the
+ // available width (with a fixed gutter between them) instead of fixed pixel offsets left over from
+ // when the window was narrower - that's what let the right column's sliders stay a fixed 185px while
+ // the panel around them kept growing, reading as lopsided/empty on one side. Identical block in
+ // resized() below positions the real slider/combo/button components the same way.
+ const float colLeft=42.f, colRight=a.getWidth()-42.f, gutter=60.f;
+ const float colW=(colRight-colLeft-gutter)*0.5f;
+ const float leftColX=colLeft, rightColX=colLeft+colW+gutter;
+ const float sliderIndent=103.f; // room for the row label before the slider starts
+ const float rightGap=40.f, rightHalfW=(colW-rightGap)*0.5f, rightCol2X=rightColX+rightHalfW+rightGap;
+ label(g,"MATCH AMOUNT",{leftColX,chart.getBottom()+47,150,18},muted());label(g,"FREQUENCY RANGE",{rightColX,chart.getBottom()+47,180,18},muted());
  int y=(int)chart.getBottom()+70;
- label(g,"STEREO",{45,(float)y+2,80,18},white()); label(g,"MID",{45,(float)y+44,80,18},yellow()); label(g,"SIDE",{45,(float)y+86,80,18},blue());
- label(g,"LOW HZ",{700,(float)y+2,100,18},muted()); label(g,"HIGH HZ",{900,(float)y+2,100,18},muted());
+ label(g,"STEREO",{leftColX+3,(float)y+2,80,18},white()); label(g,"MID",{leftColX+3,(float)y+44,80,18},yellow()); label(g,"SIDE",{leftColX+3,(float)y+86,80,18},blue());
+ label(g,"LOW HZ",{rightColX,(float)y+2,100,18},muted()); label(g,"HIGH HZ",{rightCol2X,(float)y+2,100,18},muted());
  // FIX (layout - your mockup): MODE/WIDTH/STAGE/DEPTH moved out of their old disconnected spot
  // (floating below MATCH AMOUNT, in a column with nothing above or below it) and into the same right
  // column as FREQUENCY RANGE, directly under LOW/HIGH HZ - fills the space that used to just sit
  // empty there once the meters moved out, and reads as one coherent box instead of three scattered ones.
- label(g,"STEREOIZATION",{700,(float)y+88,180,16},muted());
- label(g,"MODE",{700,(float)y+100,100,18},muted()); label(g,"WIDTH AMT",{900,(float)y+100,100,18},muted()); label(g,"STAGE",{700,(float)y+132,100,18},muted()); label(g,"DEPTH %",{900,(float)y+132,100,18},muted());
+ label(g,"STEREOIZATION",{rightColX,(float)y+88,180,16},muted());
+ label(g,"MODE",{rightColX,(float)y+100,100,18},muted()); label(g,"WIDTH AMT",{rightCol2X,(float)y+100,100,18},muted()); label(g,"STAGE",{rightColX,(float)y+132,100,18},muted()); label(g,"DEPTH %",{rightCol2X,(float)y+132,100,18},muted());
  // FIX (layout - meters relocated beside the chart, per the reference): its own small panel, with
  // the same shadow+gradient treatment as the main chart/control panels, sitting directly right of
  // the analyzer instead of buried in the bottom "FREQUENCY RANGE" box.
@@ -774,7 +809,16 @@ void PQAudioProcessorEditor::resized(){auto a=getLocalBounds();
  chartFull.removeFromRight(16.f);
  auto chart=chartFull;
  int y=chart.getBottom()+70;
- sAmt.setBounds(145,y,470,22);mAmt.setBounds(145,y+42,470,22);siAmt.setBounds(145,y+84,470,22);low.setBounds(700,y+18,185,22);high.setBounds(900,y+18,185,22);
+ // FIX (layout balance - matches paint()): identical symmetric two-column computation, so the real
+ // components land exactly where their labels/track backgrounds were drawn.
+ const float colLeft=42.f, colRight=(float)a.getWidth()-42.f, gutter=60.f;
+ const float colW=(colRight-colLeft-gutter)*0.5f;
+ const float leftColX=colLeft, rightColX=colLeft+colW+gutter;
+ const float sliderIndent=103.f;
+ const float rightGap=40.f, rightHalfW=(colW-rightGap)*0.5f, rightCol2X=rightColX+rightHalfW+rightGap;
+ const float matchSliderX=leftColX+sliderIndent, matchSliderW=colW-sliderIndent-8.f;
+ sAmt.setBounds((int)matchSliderX,y,(int)matchSliderW,22);mAmt.setBounds((int)matchSliderX,y+42,(int)matchSliderW,22);siAmt.setBounds((int)matchSliderX,y+84,(int)matchSliderW,22);
+ low.setBounds((int)rightColX,y+18,(int)rightHalfW,22);high.setBounds((int)rightCol2X,y+18,(int)rightHalfW,22);
  // FIX (layout - meters relocated beside the chart): IN bar | OUT bar side by side near the top of
  // the panel, MATCH GAIN spanning the full width below them - replaces the old fixed 700/900,
  // y+62-relative spots that used to live down in the "FREQUENCY RANGE" box.
@@ -789,7 +833,7 @@ void PQAudioProcessorEditor::resized(){auto a=getLocalBounds();
      inputTrim.setBounds(inputMeterArea.toNearestInt()); outputTrim.setBounds(outputMeterArea.toNearestInt());
      matchGainBtn.setBounds(btnRow.toNearestInt());
  }
- mode.setBounds(700,y+115,185,25);width.setBounds(900,y+115,185,25);widthStage.setBounds(700,y+147,90,25);depth.setBounds(900,y+147,185,25);capture.setBounds(42,y+190,90,30);apply.setBounds(140,y+190,80,30);clear.setBounds(230,y+190,75,30);
+ mode.setBounds((int)rightColX,y+115,(int)rightHalfW,25);width.setBounds((int)rightCol2X,y+115,(int)rightHalfW,25);widthStage.setBounds((int)rightColX,y+147,90,25);depth.setBounds((int)rightCol2X,y+147,(int)rightHalfW,25);capture.setBounds(42,y+190,90,30);apply.setBounds(140,y+190,80,30);clear.setBounds(230,y+190,75,30);
  status.setBounds(325,y+190,300,30);
  // FIX (preset restructure): overlay now anchored under the preset list/kebab on the LEFT, where
  // those controls actually live - and shrunk (no more list row inside it) to just fit name/save/
