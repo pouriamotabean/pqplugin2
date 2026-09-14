@@ -90,10 +90,16 @@ PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcesso
  side.onClick=[this]{p.sideOn.store(!p.sideOn.load()); refreshBandButtons();};
  refreshBandButtons();
 
- // FIX (item 2/3): one show/hide dot per manual-EQ target, tinted to match that target's node/curve
- // colour so it's obvious at a glance which switch controls which line. Purely a display filter -
- // repaint() is all that's needed, the underlying bands and audio are untouched.
- for(auto* t:{&stereoEqToggle,&midEqToggle,&sideEqToggle}){ addAndMakeVisible(*t); t->setToggleState(true,juce::dontSendNotification); t->onClick=[this]{repaint();}; }
+ // FIX: one show/hide dot per manual-EQ target, tinted to match that target's node/curve colour so
+ // it's obvious at a glance which switch controls which line. All three now start OFF (hollow ring,
+ // unchecked) - no line exists/edits by default. Switching one ON both reveals that target's curve
+ // AND arms it as the target for the next node you add on the chart (see updateActiveTargetStack);
+ // switching it back off disarms it. This replaces the old behaviour where a new node always
+ // defaulted to Stereo and had to be moved to Mid/Side afterwards via right-click.
+ for(auto* t:{&stereoEqToggle,&midEqToggle,&sideEqToggle}) { addAndMakeVisible(*t); t->setToggleState(false,juce::dontSendNotification); }
+ stereoEqToggle.onClick=[this]{ updateActiveTargetStack(PQAudioProcessor::ManualTarget::Stereo, stereoEqToggle.getToggleState()); repaint(); };
+ midEqToggle.onClick=[this]{ updateActiveTargetStack(PQAudioProcessor::ManualTarget::Mid, midEqToggle.getToggleState()); repaint(); };
+ sideEqToggle.onClick=[this]{ updateActiveTargetStack(PQAudioProcessor::ManualTarget::Side, sideEqToggle.getToggleState()); repaint(); };
  stereoEqToggle.setDotColour(manualStereoColour());
  midEqToggle.setDotColour(manualMidColour());
  sideEqToggle.setDotColour(manualSideColour());
@@ -149,6 +155,14 @@ void PQAudioProcessorEditor::syncControlsFromProcessor(){
  inputTrim.setValue(p.inputTrimDb.load(),juce::dontSendNotification);
  outputTrim.setValue(p.outputTrimDb.load(),juce::dontSendNotification);
  repaint();
+}
+
+// See header: the toggle that was most recently switched ON is where new manual-EQ nodes go.
+// Several toggles can be on together (each keeps showing/editing its own curve); only the stack
+// order changes which one is "armed" for the very next added node.
+void PQAudioProcessorEditor::updateActiveTargetStack(PQAudioProcessor::ManualTarget t, bool on){
+    activeManualTargets.removeAllInstancesOf(t);
+    if(on) activeManualTargets.add(t);
 }
 
 void PQAudioProcessorEditor::refreshBandButtons(){
@@ -380,13 +394,18 @@ void PQAudioProcessorEditor::mouseDown(const juce::MouseEvent& e){
     int hit=findBandNear(e.position);
     if(e.mods.isRightButtonDown()){
         if(hit>=0){ selectedBand=hit; showBandTypeMenu(hit, e.getScreenPosition()); }
-        else showAddBandMenu(e.position, e.getScreenPosition());
+        else if(hasActiveManualTarget()) showAddBandMenu(e.position, e.getScreenPosition());
         return;
     }
     // FIX (item 1): left-clicking empty chart space creates a Bell node immediately and starts
     // dragging it right away, instead of waiting for a double-click.
+    // FIX (target now comes from the toggles): a new node is only created if at least one of the
+    // Stereo/Mid/Side toggles is switched on, and it's created on whichever one was switched on most
+    // recently - not hardcoded to Stereo anymore. With nothing armed, clicking empty chart space does
+    // nothing (there's nothing to add a line for).
     if(hit<0){
-        hit=p.addManualBand(PQAudioProcessor::ManualType::Bell, xToFreq(e.position.x), yToGainDb(e.position.y), 0.7f);
+        if(!hasActiveManualTarget()){ draggingBand=-1; selectedBand=-1; return; }
+        hit=p.addManualBand(PQAudioProcessor::ManualType::Bell, xToFreq(e.position.x), yToGainDb(e.position.y), 0.7f, currentManualTarget());
         repaint();
     }
     draggingBand=hit; selectedBand=hit; draggedPastThreshold=false; mouseDownPos=e.position;
@@ -425,61 +444,38 @@ bool PQAudioProcessorEditor::keyPressed(const juce::KeyPress& k){
     return false;
 }
 void PQAudioProcessorEditor::showBandTypeMenu(int bandIndex, juce::Point<int> screenPos){
-    using T=PQAudioProcessor::ManualType; using MT=PQAudioProcessor::ManualTarget;
+    using T=PQAudioProcessor::ManualType;
+    // FIX (target now owned by the top toggles, not this menu): a node's Stereo/Mid/Side target used
+    // to be changeable here via a "Move To" submenu. That's now redundant and removed - which target
+    // a node belongs to is fixed at creation by whichever toggle was armed (see mouseDown /
+    // updateActiveTargetStack), so this menu is Type + Delete only.
     juce::PopupMenu m; m.setLookAndFeel(&bigMenuLnf); // FIX (item 5): 3x larger menu text
     m.addItem(1,"Bell"); m.addItem(2,"Low Shelf"); m.addItem(3,"High Shelf"); m.addItem(4,"Low Cut"); m.addItem(5,"High Cut"); m.addItem(6,"Notch");
-    m.addSeparator();
-    // FIX (item 1, actually wired up this time): PQAudioProcessor::setManualBandTarget() already
-    // existed but no menu ever called it, so a node's target (Stereo/Mid/Side) was fixed forever at
-    // creation - the only way to a get a Mid/Side node was to build it that way from scratch via the
-    // empty-space "Add Band" menu. This submenu lets an *existing* node be moved between targets at
-    // any time; a checkmark shows which target it's on now.
-    MT currentTarget = p.manualBands[(size_t)bandIndex].target.load();
-    juce::PopupMenu moveMenu; moveMenu.setLookAndFeel(&bigMenuLnf);
-    moveMenu.addItem(101,"Stereo",true,currentTarget==MT::Stereo);
-    moveMenu.addItem(102,"Mid",   true,currentTarget==MT::Mid);
-    moveMenu.addItem(103,"Side",  true,currentTarget==MT::Side);
-    m.addSubMenu("Move To",moveMenu);
     m.addSeparator(); m.addItem(7,"Delete Band");
     juce::PopupMenu::Options opts; opts = opts.withTargetScreenArea(juce::Rectangle<int>(screenPos,screenPos));
     m.showMenuAsync(opts, [this,bandIndex](int result){
         if(result==0) return;
         if(result==7){ p.removeManualBand(bandIndex); if(selectedBand==bandIndex) selectedBand=-1; repaint(); return; }
-        if(result>=101 && result<=103){
-            static const MT targets[]={MT::Stereo,MT::Mid,MT::Side};
-            p.setManualBandTarget(bandIndex, targets[result-101]); repaint(); return;
-        }
         static const T types[]={T::Bell,T::LowShelf,T::HighShelf,T::LowCut,T::HighCut,T::Notch};
         p.setManualBandType(bandIndex, types[result-1]); repaint();
     });
 }
 void PQAudioProcessorEditor::showAddBandMenu(juce::Point<float> chartPos, juce::Point<int> screenPos){
-    using T=PQAudioProcessor::ManualType; using MT=PQAudioProcessor::ManualTarget;
-    // FIX (item 2): right-click on empty chart now asks for Target (Stereo/Mid/Side) as well as
-    // filter Type, via one submenu per target. Result ids are offset per target (Stereo 1-6,
-    // Mid 11-16, Side 21-26) so a single callback can decode both from the chosen id.
-    // FIX (item 5): each submenu is its own PopupMenu instance under the hood, so the bigger font
-    // has to be set on it individually too - setting it only on the parent `m` doesn't propagate.
-    auto typeSubMenu=[this](int base){
-        juce::PopupMenu sub; sub.setLookAndFeel(&bigMenuLnf);
-        sub.addItem(base+1,"Bell"); sub.addItem(base+2,"Low Shelf"); sub.addItem(base+3,"High Shelf");
-        sub.addItem(base+4,"Low Cut"); sub.addItem(base+5,"High Cut"); sub.addItem(base+6,"Notch");
-        return sub;
-    };
+    using T=PQAudioProcessor::ManualType;
+    // FIX (target now owned by the top toggles): right-click-on-empty-chart used to ask for
+    // Target (Stereo/Mid/Side) as well as filter Type, via one submenu per target. Target selection
+    // here is now redundant (see showBandTypeMenu comment above) - the new node always goes to
+    // currentManualTarget(), the toggle that's currently armed. Caller (mouseDown) only opens this
+    // menu when hasActiveManualTarget() is true, so there's always a valid target here.
     juce::PopupMenu m; m.setLookAndFeel(&bigMenuLnf); // FIX (item 5): 3x larger menu text
-    m.addSubMenu("Stereo", typeSubMenu(0));
-    m.addSubMenu("Mid",    typeSubMenu(10));
-    m.addSubMenu("Side",   typeSubMenu(20));
+    m.addItem(1,"Bell"); m.addItem(2,"Low Shelf"); m.addItem(3,"High Shelf"); m.addItem(4,"Low Cut"); m.addItem(5,"High Cut"); m.addItem(6,"Notch");
     juce::PopupMenu::Options opts; opts = opts.withTargetScreenArea(juce::Rectangle<int>(screenPos,screenPos));
     float hz=xToFreq(chartPos.x), gainDb=yToGainDb(chartPos.y);
-    m.showMenuAsync(opts, [this,hz,gainDb](int result){
-        if(result==0) return;
+    auto target=currentManualTarget();
+    m.showMenuAsync(opts, [this,hz,gainDb,target](int result){
+        if(result<1||result>6) return;
         static const T types[]={T::Bell,T::LowShelf,T::HighShelf,T::LowCut,T::HighCut,T::Notch};
-        MT target=MT::Stereo; int typeIdx=result;
-        if(result>=21){ target=MT::Side; typeIdx=result-20; }
-        else if(result>=11){ target=MT::Mid; typeIdx=result-10; }
-        if(typeIdx<1||typeIdx>6) return;
-        T type=types[typeIdx-1];
+        T type=types[result-1];
         float g = (type==T::LowCut||type==T::HighCut||type==T::Notch) ? 0.f : gainDb;
         p.addManualBand(type, hz, g, 0.7f, target); repaint();
     });
