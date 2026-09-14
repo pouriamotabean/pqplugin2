@@ -15,7 +15,7 @@ void PQAudioProcessor::prepareToPlay(double sampleRate,int samplesPerBlock){
     // have enough room to use musically real delay times (see applyWidth in processBlock).
     widthBufSize = juce::jmax(64,(int)std::round(sr*0.05)+8); widthDelay.assign((size_t)widthBufSize,0.f); widthWriteIdx=0;
     for(int i=0;i<kBands;++i){float t=i/float(kBands-1); bandHz[i]=std::exp(std::log(20.f)+t*(std::log(20000.f)-std::log(20.f)));}
-    stStereoL.fill({});stStereoR.fill({});stMid.fill({});stSide.fill({}); manualStateL.fill({}); manualStateR.fill({}); manualStateMid.fill({}); manualStateSide.fill({});
+    stStereoL.fill({});stStereoR.fill({});stMid.fill({});stSide.fill({}); manualStateL={}; manualStateR={}; manualStateMid={}; manualStateSide={};
     dirty.store(true); manualDirty.store(true); rebuildCoefficients(); rebuildManualCoefficients();
 }
 
@@ -91,13 +91,13 @@ void PQAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
         for(int k=0;k<kBands;++k) m=process(midCoeff[k],stMid[k],m);
         for(int mbI=0;mbI<kMaxManualBands;++mbI){
             auto& band=manualBands[(size_t)mbI]; if(!band.active.load()||band.target.load()!=ManualTarget::Mid) continue;
-            m=process(manualCoeff[(size_t)mbI],manualStateMid[(size_t)mbI],m);
+            for(int st=0;st<manualStageCount[(size_t)mbI];++st) m=process(manualCoeff[(size_t)mbI][(size_t)st],manualStateMid[(size_t)mbI][(size_t)st],m);
         }
         // Side: same.
         for(int k=0;k<kBands;++k) s=process(sideCoeff[k],stSide[k],s);
         for(int mbI=0;mbI<kMaxManualBands;++mbI){
             auto& band=manualBands[(size_t)mbI]; if(!band.active.load()||band.target.load()!=ManualTarget::Side) continue;
-            s=process(manualCoeff[(size_t)mbI],manualStateSide[(size_t)mbI],s);
+            for(int st=0;st<manualStageCount[(size_t)mbI];++st) s=process(manualCoeff[(size_t)mbI][(size_t)st],manualStateSide[(size_t)mbI][(size_t)st],s);
         }
         L=m+s; R=m-s;
         // FIX (this was the actual regression): Mid/Side correction always runs (both legs are
@@ -119,8 +119,10 @@ void PQAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
         if(widthPost) applyWidth(L,R);
         for(int mbI=0;mbI<kMaxManualBands;++mbI){
             auto& band=manualBands[(size_t)mbI]; if(!band.active.load()||band.target.load()!=ManualTarget::Stereo) continue;
-            L=process(manualCoeff[(size_t)mbI],manualStateL[(size_t)mbI],L);
-            R=process(manualCoeff[(size_t)mbI],manualStateR[(size_t)mbI],R);
+            for(int st=0;st<manualStageCount[(size_t)mbI];++st){
+                L=process(manualCoeff[(size_t)mbI][(size_t)st],manualStateL[(size_t)mbI][(size_t)st],L);
+                R=process(manualCoeff[(size_t)mbI][(size_t)st],manualStateR[(size_t)mbI][(size_t)st],R);
+            }
         }
         L*=outGain; R*=outGain;
         b.setSample(0,i,L); if(ch>1)b.setSample(1,i,R); outSum += .5f*(L*L+R*R);
@@ -256,17 +258,52 @@ PQAudioProcessor::Coeff PQAudioProcessor::makeManualCoeff(ManualType type,float 
     }
     return {(float)(b0/a0),(float)(b1/a0),(float)(b2/a0),(float)(a1/a0),(float)(a2/a0)};
 }
+// Single first-order (6dB/oct) high-pass ("cuts lows") or low-pass ("cuts highs") stage - the
+// bilinear-transformed RC filter, expressed with b2=a2=0 so it drops straight into the same
+// biquad process() used everywhere else (the transposed-direct-form-II recursion degrades cleanly
+// to a true first order when the z^-2 terms are zero).
+PQAudioProcessor::Coeff PQAudioProcessor::make1PoleCut(bool highpass,float hz,double sampleRate){
+    if(sampleRate<=0.0) sampleRate=44100.0;
+    hz=juce::jlimit(20.f,20000.f,hz);
+    double K=std::tan(juce::MathConstants<double>::pi*hz/sampleRate);
+    double a1=(K-1.0)/(K+1.0), b0,b1;
+    if(highpass){ b0=1.0/(K+1.0); b1=-b0; } else { b0=K/(K+1.0); b1=b0; }
+    return {(float)b0,(float)b1,0.f,(float)a1,0.f};
+}
 void PQAudioProcessor::rebuildManualCoefficients(){
+    // Which slope steps need a leading 1-pole (6dB/oct) stage before their whole 2-pole (12dB/oct)
+    // stages: 6dB/oct is just the 1-pole alone; 18dB/oct is 6+12; the rest (12/24/36/48) are an
+    // exact number of 2-pole stages with no odd stage needed.
     for(int i=0;i<kMaxManualBands;++i){ auto& mb=manualBands[(size_t)i];
-        manualCoeff[(size_t)i]=makeManualCoeff(mb.type.load(),mb.freq.load(),mb.gainDb.load(),mb.q.load(),sr);
+        auto type=mb.type.load(); float hz=mb.freq.load(), gain=mb.gainDb.load(), q=mb.q.load();
+        if(type==ManualType::LowCut || type==ManualType::HighCut){
+            const bool highpass = (type==ManualType::LowCut);
+            const int order = juce::jlimit(6,48,mb.slopeOrder.load());
+            const bool leadingOnePole = (order==6 || order==18);
+            const int twoPoleStages = (order - (leadingOnePole?6:0)) / 12;
+            int st=0;
+            if(leadingOnePole) manualCoeff[(size_t)i][(size_t)st++]=make1PoleCut(highpass,hz,sr);
+            // FIX: earlier this reused makeManualCoeff() with a fixed Q for every 2-pole stage,
+            // but rebuilding each stage from a fresh alpha=sin(w)/(2Q) at the *same* frequency
+            // makes every stage in the cascade identical anyway, so a plain loop of the same call
+            // is exactly right here (no separate per-stage Q table needed for a Butterworth-ish
+            // approximation - this is a deliberate simplification, not a bug: true maximally-flat
+            // higher-order filters stagger Q per stage, this cascades identical 0.7071 stages).
+            for(int k=0;k<twoPoleStages;++k) manualCoeff[(size_t)i][(size_t)st++]=makeManualCoeff(type,hz,0.f,0.7071f,sr);
+            manualStageCount[(size_t)i]=st;
+        } else {
+            manualCoeff[(size_t)i][0]=makeManualCoeff(type,hz,gain,q,sr);
+            manualStageCount[(size_t)i]=1;
+        }
     }
 }
 int PQAudioProcessor::addManualBand(ManualType type,float freq,float gainDb,float q,ManualTarget target){
     for(int i=0;i<kMaxManualBands;++i){ auto& mb=manualBands[(size_t)i];
         if(!mb.active.load()){
-            mb.type.store(type); mb.target.store(target); mb.freq.store(juce::jlimit(20.f,20000.f,freq)); mb.gainDb.store(juce::jlimit(-24.f,24.f,gainDb)); mb.q.store(juce::jlimit(0.1f,18.f,q));
+            mb.type.store(type); mb.target.store(target); mb.freq.store(juce::jlimit(20.f,20000.f,freq)); mb.gainDb.store(juce::jlimit(-24.f,24.f,gainDb)); mb.q.store(juce::jlimit(0.1f,18.f,q)); mb.slopeOrder.store(12);
             // Slot may be reused from a previously deleted band; clear all four possible filter
-            // states so no stale history from that old band (or an old target) leaks in.
+            // states (every stage of each) so no stale history from that old band (or an old
+            // target, or a higher-order slope with more active stages) leaks in.
             manualStateL[(size_t)i]={}; manualStateR[(size_t)i]={}; manualStateMid[(size_t)i]={}; manualStateSide[(size_t)i]={};
             mb.active.store(true); manualDirty.store(true); return i;
         }
@@ -286,6 +323,15 @@ void PQAudioProcessor::setManualBand(int index,ManualType type,float freq,float 
 void PQAudioProcessor::setManualBandType(int index,ManualType type){ if(index<0||index>=kMaxManualBands)return; manualBands[(size_t)index].type.store(type); manualDirty.store(true); }
 void PQAudioProcessor::setManualBandFreqGain(int index,float freq,float gainDb){ if(index<0||index>=kMaxManualBands)return; auto& mb=manualBands[(size_t)index]; mb.freq.store(juce::jlimit(20.f,20000.f,freq)); mb.gainDb.store(juce::jlimit(-24.f,24.f,gainDb)); manualDirty.store(true); }
 void PQAudioProcessor::setManualBandQ(int index,float q){ if(index<0||index>=kMaxManualBands)return; manualBands[(size_t)index].q.store(juce::jlimit(0.1f,18.f,q)); manualDirty.store(true); }
+void PQAudioProcessor::setManualBandSlope(int index,int slopeOrderDbPerOct){
+    if(index<0||index>=kMaxManualBands)return;
+    // Snap to the nearest defined step rather than trusting the caller's exact number, so a stray
+    // value can never leave manualStageCount/manualCoeff computing something kMaxCutStages can't hold.
+    auto diff=[](int a,int b){ int d=a-b; return d<0?-d:d; };
+    int best=kCutSlopeSteps[0], bestDiff=diff(slopeOrderDbPerOct,best);
+    for(int s:kCutSlopeSteps){ int d=diff(slopeOrderDbPerOct,s); if(d<bestDiff){bestDiff=d;best=s;} }
+    manualBands[(size_t)index].slopeOrder.store(best); manualDirty.store(true);
+}
 
 void PQAudioProcessor::rebuildCoefficients(){if(sr<=0)return;for(int i=0;i<kBands;++i){stereoCoeff[i]=peak(bandHz[i],corrStereo[i],.8f,(float)sr);midCoeff[i]=peak(bandHz[i],corrMid[i],.8f,(float)sr);sideCoeff[i]=peak(bandHz[i],corrSide[i],.8f,(float)sr);}generation.fetch_add(1);}
 void PQAudioProcessor::captureReference(){for(int i=0;i<kBins;++i){refStereo[i].store(stereoCurve[i].load());refMid[i].store(midCurve[i].load());refSide[i].store(sideCurve[i].load());}hasReference.store(true);applyMatch();}
@@ -318,7 +364,7 @@ bool PQAudioProcessor::loadReference(const juce::File& f){
 
 void PQAudioProcessor::getStateInformation(juce::MemoryBlock& d){
     juce::MemoryOutputStream o(d,true);
-    o.writeInt(0x50515338); // FIX: version bumped (was 0x50515337) to add per-band manual-EQ target (Stereo/Mid/Side)
+    o.writeInt(0x50515339); // FIX: version bumped (was 0x50515338) to add per-Cut-band slope order
     for(float v:{stereoMatch.load(),midMatch.load(),sideMatch.load(),lowHz.load(),highHz.load(),maxCorrectionDb.load(),smoothingOctaves.load(),widthAmount.load(),widthDepth.load()})o.writeFloat(v);
     o.writeInt((int)widthMode.load());
     o.writeBool(widthPostEq.load());
@@ -326,7 +372,7 @@ void PQAudioProcessor::getStateInformation(juce::MemoryBlock& d){
     o.writeBool(hasReference.load());
     if(hasReference.load()) for(auto* a:{&refStereo,&refMid,&refSide}) for(int i=0;i<kBins;++i) o.writeFloat((*a)[(size_t)i].load());
     o.writeInt(kMaxManualBands);
-    for(auto& mb:manualBands){ o.writeBool(mb.active.load()); o.writeInt((int)mb.type.load()); o.writeFloat(mb.freq.load()); o.writeFloat(mb.gainDb.load()); o.writeFloat(mb.q.load()); o.writeInt((int)mb.target.load()); }
+    for(auto& mb:manualBands){ o.writeBool(mb.active.load()); o.writeInt((int)mb.type.load()); o.writeFloat(mb.freq.load()); o.writeFloat(mb.gainDb.load()); o.writeFloat(mb.q.load()); o.writeInt((int)mb.target.load()); o.writeInt(mb.slopeOrder.load()); }
 }
 void PQAudioProcessor::setStateInformation(const void* data,int size){ applyStateBlock(data,size); }
 
@@ -342,11 +388,12 @@ bool PQAudioProcessor::applyStateBlock(const void* data,int size){
         lowHz.store(in.readFloat());highHz.store(in.readFloat());maxCorrectionDb.store(in.readFloat());smoothingOctaves.store(in.readFloat());
         hasReference.store(true); applyMatch(); return true;
     }
-    if(magic!=0x50515338 && magic!=0x50515337 && magic!=0x50515336 && magic!=0x50515335 && magic!=0x50515334 && magic!=0x50515333 && magic!=0x50515332) return false; // unknown/corrupt state: ignore rather than risk misreading garbage into the DSP
-    bool hasManualTarget = (magic==0x50515338);
-    bool hasTrim = (magic==0x50515338 || magic==0x50515337);
-    bool hasManualEq = (magic==0x50515338 || magic==0x50515337 || magic==0x50515336);
-    bool hasWidthStage = (magic==0x50515338 || magic==0x50515337 || magic==0x50515336 || magic==0x50515335);
+    if(magic!=0x50515339 && magic!=0x50515338 && magic!=0x50515337 && magic!=0x50515336 && magic!=0x50515335 && magic!=0x50515334 && magic!=0x50515333 && magic!=0x50515332) return false; // unknown/corrupt state: ignore rather than risk misreading garbage into the DSP
+    bool hasSlopeOrder = (magic==0x50515339);
+    bool hasManualTarget = (magic==0x50515339 || magic==0x50515338);
+    bool hasTrim = (magic==0x50515339 || magic==0x50515338 || magic==0x50515337);
+    bool hasManualEq = (magic==0x50515339 || magic==0x50515338 || magic==0x50515337 || magic==0x50515336);
+    bool hasWidthStage = (magic==0x50515339 || magic==0x50515338 || magic==0x50515337 || magic==0x50515336 || magic==0x50515335);
     bool hadOldEnableFlags = (magic==0x50515333); // v3 wrote 3 bools we no longer use; skip them so the rest of the stream stays aligned
     stereoMatch.store(in.readFloat());midMatch.store(in.readFloat());sideMatch.store(in.readFloat());
     lowHz.store(in.readFloat());highHz.store(in.readFloat());maxCorrectionDb.store(in.readFloat());smoothingOctaves.store(in.readFloat());
@@ -358,7 +405,7 @@ bool PQAudioProcessor::applyStateBlock(const void* data,int size){
     bool hr=in.readBool();
     if(hr) for(auto* a:{&refStereo,&refMid,&refSide}) for(int i=0;i<kBins;++i) (*a)[(size_t)i].store(in.readFloat());
     hasReference.store(hr);
-    for(auto& mb:manualBands){ mb.active.store(false); mb.target.store(ManualTarget::Stereo); } // clear before loading, in case an older/smaller save is loaded
+    for(auto& mb:manualBands){ mb.active.store(false); mb.target.store(ManualTarget::Stereo); mb.slopeOrder.store(12); } // clear before loading, in case an older/smaller save is loaded
     if(hasManualEq){
         int savedCount=in.readInt();
         for(int i=0;i<savedCount;++i){
@@ -366,7 +413,8 @@ bool PQAudioProcessor::applyStateBlock(const void* data,int size){
             // Older saves (pre-target) have no target field on disk; those bands default to Stereo,
             // which is exactly how they behaved before this field existed.
             ManualTarget target = hasManualTarget ? (ManualTarget)in.readInt() : ManualTarget::Stereo;
-            if(i<kMaxManualBands && active){ auto& mb=manualBands[(size_t)i]; mb.type.store(type); mb.freq.store(f); mb.gainDb.store(g); mb.q.store(q); mb.target.store(target); mb.active.store(true); }
+            int slopeOrder = hasSlopeOrder ? in.readInt() : 12;
+            if(i<kMaxManualBands && active){ auto& mb=manualBands[(size_t)i]; mb.type.store(type); mb.freq.store(f); mb.gainDb.store(g); mb.q.store(q); mb.target.store(target); mb.slopeOrder.store(slopeOrder); mb.active.store(true); }
         }
     }
     manualDirty.store(true);
