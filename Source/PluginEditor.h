@@ -97,8 +97,27 @@ private:
     juce::Label title{"", "MANAGE PRESETS"};
     juce::TextEditor nameBox;
     juce::TextButton saveBtn{"SAVE"}, deleteBtn{"DELETE"}, closeBtn{"X"};
+    // I2: the reference curve alone, as its own .pqmatch file - separate from a full .pqref preset.
+    // FileChoosers here are unrestricted (not locked to presetDir()), since the whole point is
+    // handing this to another project or another person, not browsing a fixed local list.
+    juce::TextButton exportMatchBtn{"EXPORT MATCH"}, importMatchBtn{"IMPORT MATCH"};
+    std::unique_ptr<juce::FileChooser> activeChooser; // keeps the async FileChooser alive until it completes
     static juce::File presetDir();
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PresetPanel)
+};
+
+// I3: MATCH GAIN needs two distinct actions on one small button - left-click performs the match
+// (the normal onClick), right-click just cycles which pair of meters it reads (Peak/RMS) without
+// also performing a match. Plain TextButton::onClick fires for either mouse button, so the mode
+// switch would otherwise also trigger a match every time; overriding mouseUp lets the two stay separate.
+class MatchGainButton : public juce::TextButton {
+public:
+    using juce::TextButton::TextButton;
+    std::function<void()> onRightClick;
+    void mouseUp(const juce::MouseEvent& e) override {
+        if(e.mods.isRightButtonDown() && onRightClick){ onRightClick(); return; }
+        juce::TextButton::mouseUp(e);
+    }
 };
 
 class PQAudioProcessorEditor:public juce::AudioProcessorEditor,private juce::Timer{
@@ -111,7 +130,7 @@ public: explicit PQAudioProcessorEditor(PQAudioProcessor&); ~PQAudioProcessorEdi
  // not just via the right-click "Delete Band" menu item.
  bool keyPressed(const juce::KeyPress&) override;
 private:
- PQAudioProcessor& p; DotTabButton stereo{"STEREO"},mid{"MID"},side{"SIDE"}; juce::TextButton capture{"CAPTURE"},apply{"APPLY"},clear{"CLEAR"},widthStage{"PRE"},matchGainBtn{"MATCH GAIN"},bypass{"BYPASS"}; KebabButton presetsBtn;
+ PQAudioProcessor& p; DotTabButton stereo{"STEREO"},mid{"MID"},side{"SIDE"}; juce::TextButton capture{"CAPTURE"},apply{"APPLY"},clear{"CLEAR"},widthStage{"PRE"},bypass{"BYPASS"}; MatchGainButton matchGainBtn{"MATCH GAIN"}; KebabButton presetsBtn;
  juce::Slider sAmt,mAmt,siAmt,low,high,width,depth;
  // Max dB / Smoothing are no longer exposed as sliders (kept fixed at sane defaults in the
  // processor); this screen space now holds the input/output level meters + trim faders instead.
@@ -143,6 +162,9 @@ private:
  bool hasActiveManualTarget() const { return !activeManualTargets.isEmpty(); }
  PQAudioProcessor::ManualTarget currentManualTarget() const { return activeManualTargets.getLast(); }
  BigPopupLookAndFeel bigMenuLnf;
+ // I6: JUCE shows a tooltip automatically for any component with setTooltip() text, as long as one
+ // TooltipWindow exists somewhere in the plugin's component tree - this is that one instance.
+ juce::TooltipWindow tooltipWindow{this, 500};
  void timerCallback()override{repaint();} void setupButton(juce::TextButton&,juce::Colour); void setupSlider(juce::Slider&,double,double,double); void setupVerticalTrim(juce::Slider&); void label(juce::Graphics&,juce::String,juce::Rectangle<float>,juce::Colour);
  void refreshBandButtons();
  void refreshBypassButton();
