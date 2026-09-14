@@ -120,6 +120,43 @@ public:
     }
 };
 
+// The glow/colour-shift-on-drag effect requested for the horizontal sliders (WIDTH AMT, DEPTH%,
+// LOW/HIGH HZ, and the three MATCH AMOUNT faders): the track fills with a soft glowing colour from
+// the left up to the thumb, instead of JUCE's default flat grey track. One instance is shared by
+// however many sliders should glow the same colour (set once via setGlowColour(), see the editor
+// constructor); non-horizontal sliders fall back to the normal LookAndFeel_V4 drawing untouched.
+class GlowSliderLookAndFeel : public juce::LookAndFeel_V4 {
+public:
+    void setGlowColour(juce::Colour c){ glowColour=c; }
+    void drawLinearSlider(juce::Graphics& g, int x, int y, int width, int height, float sliderPos,
+                           float minSliderPos, float maxSliderPos,
+                           const juce::Slider::SliderStyle style, juce::Slider& slider) override {
+        if(style!=juce::Slider::SliderStyle::LinearHorizontal){
+            juce::LookAndFeel_V4::drawLinearSlider(g,x,y,width,height,sliderPos,minSliderPos,maxSliderPos,style,slider);
+            return;
+        }
+        float trackH=4.f, cy=(float)y+(float)height*0.5f;
+        juce::Rectangle<float> full((float)x,cy-trackH*0.5f,(float)width,trackH);
+        g.setColour(juce::Colour(0xff242a31)); g.fillRoundedRectangle(full,trackH*0.5f);
+        float filledW=juce::jmax(0.f, sliderPos-(float)x);
+        if(filledW>1.f){
+            juce::Rectangle<float> filled((float)x,cy-trackH*0.5f,filledW,trackH);
+            juce::Path filledPath; filledPath.addRoundedRectangle(filled,trackH*0.5f);
+            juce::DropShadow glow(glowColour.withAlpha(0.6f),10,juce::Point<int>(0,0));
+            glow.drawForPath(g,filledPath);
+            g.setColour(glowColour); g.fillRoundedRectangle(filled,trackH*0.5f);
+        }
+        float thumbR=6.5f;
+        juce::Path thumbPath; thumbPath.addEllipse(sliderPos-thumbR,cy-thumbR,thumbR*2.f,thumbR*2.f);
+        juce::DropShadow thumbGlow(glowColour.withAlpha(0.8f),9,juce::Point<int>(0,0));
+        thumbGlow.drawForPath(g,thumbPath);
+        g.setColour(juce::Colours::white); g.fillEllipse(sliderPos-thumbR,cy-thumbR,thumbR*2.f,thumbR*2.f);
+        g.setColour(glowColour); g.drawEllipse(sliderPos-thumbR,cy-thumbR,thumbR*2.f,thumbR*2.f,1.5f);
+    }
+private:
+    juce::Colour glowColour{juce::Colours::white};
+};
+
 class PQAudioProcessorEditor:public juce::AudioProcessorEditor,private juce::Timer{
 public: explicit PQAudioProcessorEditor(PQAudioProcessor&); ~PQAudioProcessorEditor() override; void paint(juce::Graphics&)override; void resized()override;
  // Manual EQ (Pro-Q style) is mouse-only - no sliders/knobs at all - so it lives on the chart itself.
@@ -162,10 +199,17 @@ private:
  bool hasActiveManualTarget() const { return !activeManualTargets.isEmpty(); }
  PQAudioProcessor::ManualTarget currentManualTarget() const { return activeManualTargets.getLast(); }
  BigPopupLookAndFeel bigMenuLnf;
+ // One glow colour per slider group - see GlowSliderLookAndFeel above. sAmt/mAmt/siAmt use each
+ // target's established colour; the rest share a neutral accent (same light blue as the PQ logo
+ // gradient) since they don't have a colour identity of their own.
+ GlowSliderLookAndFeel glowWhite, glowYellow, glowBlue, glowAccent;
  // I6: JUCE shows a tooltip automatically for any component with setTooltip() text, as long as one
  // TooltipWindow exists somewhere in the plugin's component tree - this is that one instance.
  juce::TooltipWindow tooltipWindow{this, 500};
- void timerCallback()override{repaint();} void setupButton(juce::TextButton&,juce::Colour); void setupSlider(juce::Slider&,double,double,double); void setupVerticalTrim(juce::Slider&); void label(juce::Graphics&,juce::String,juce::Rectangle<float>,juce::Colour);
+ // I1: edge-detects capturingReference going false->true->false so the "REFERENCE CAPTURED" status
+ // message fires exactly once, right when a capture finishes (see timerCallback in the .cpp).
+ bool wasCapturingLastFrame=false;
+ void timerCallback()override; void setupButton(juce::TextButton&,juce::Colour); void setupSlider(juce::Slider&,double,double,double); void setupVerticalTrim(juce::Slider&); void label(juce::Graphics&,juce::String,juce::Rectangle<float>,juce::Colour);
  void refreshBandButtons();
  void refreshBypassButton();
  void drawCurve(juce::Graphics&,juce::Rectangle<float>,const std::array<std::atomic<float>,PQAudioProcessor::kBins>&,juce::Colour); void drawRef(juce::Graphics&,juce::Rectangle<float>,const std::array<std::atomic<float>,PQAudioProcessor::kBins>&,juce::Colour);
