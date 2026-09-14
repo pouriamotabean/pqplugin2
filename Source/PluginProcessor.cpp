@@ -1,21 +1,74 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include <algorithm>
 
 namespace { constexpr float kFloor=-90.f; constexpr float kMaxCap=12.f; }
+
+// ---- B1: background analysis thread -------------------------------------------------------------
+// Owns the FFT/window and the fftMid/fftSide circular history + fftPos/hopCounter that used to be
+// touched directly inside processBlock(). Drains PQAudioProcessor::analysisFifo (fed once per audio
+// block, see processBlock()) at its own pace and calls proc.analyzeAndUpdate() exactly as often as
+// processBlock used to (every kHopSize samples) - just off the audio thread, so a ~16k-point FFT is
+// never dropped into the middle of an audio callback.
+class PQAnalysisThread : public juce::Thread {
+public:
+    explicit PQAnalysisThread(PQAudioProcessor& proc) : juce::Thread("PQ Analysis"), p(proc) {}
+    void run() override {
+        while(!threadShouldExit()){
+            const int ready=p.analysisFifo.getNumReady();
+            if(ready<=0){ wait(10); continue; } // nothing new yet; processBlock's notify() wakes this early
+            int start1=0,size1=0,start2=0,size2=0;
+            p.analysisFifo.prepareToRead(ready,start1,size1,start2,size2);
+            auto consume=[&](int start,int size){
+                for(int k=0;k<size;++k){
+                    p.fftMid[(size_t)p.fftPos]=p.fifoMid[(size_t)(start+k)];
+                    p.fftSide[(size_t)p.fftPos]=p.fifoSide[(size_t)(start+k)];
+                    p.fftPos=(p.fftPos+1)%PQAudioProcessor::kFFTSize;
+                    if(++p.hopCounter>=PQAudioProcessor::kHopSize){ p.hopCounter=0; p.analyzeAndUpdate(); }
+                }
+            };
+            consume(start1,size1); consume(start2,size2);
+            p.analysisFifo.finishedRead(size1+size2);
+        }
+    }
+private:
+    PQAudioProcessor& p;
+};
 
 PQAudioProcessor::PQAudioProcessor():AudioProcessor(BusesProperties().withInput("Input",juce::AudioChannelSet::stereo(),true).withOutput("Output",juce::AudioChannelSet::stereo(),true))
 {
     for(auto& x:stereoCurve)x.store(kFloor); for(auto& x:midCurve)x.store(kFloor); for(auto& x:sideCurve)x.store(kFloor);
     for(auto& x:refStereo)x.store(kFloor); for(auto& x:refMid)x.store(kFloor); for(auto& x:refSide)x.store(kFloor);
+    for(auto& x:corrStereo)x.store(0.f); for(auto& x:corrMid)x.store(0.f); for(auto& x:corrSide)x.store(0.f);
+    fifoMid.assign((size_t)analysisFifo.getTotalSize(),0.f);
+    fifoSide.assign((size_t)analysisFifo.getTotalSize(),0.f);
+    analysisThread = std::make_unique<PQAnalysisThread>(*this);
+}
+// FIX (B1): needed now that analysisThread is a background juce::Thread touching this object's
+// members - it must be signalled to exit and joined *before* the rest of this object (including the
+// buffers it reads) starts being destroyed. Declared in the header, defined here where
+// PQAnalysisThread is a complete type.
+PQAudioProcessor::~PQAudioProcessor(){
+    if(analysisThread) analysisThread->stopThread(2000);
 }
 
 void PQAudioProcessor::prepareToPlay(double sampleRate,int samplesPerBlock){
-    juce::ignoreUnused(samplesPerBlock); sr=sampleRate; fftPos=0; hopCounter=0; prevMono=0;
+    sr.store(sampleRate);
+    // FIX (B1): pause the analysis thread while the shared history/FIFO buffers below get resized
+    // and reset, so it's never reading fftMid/fftSide mid-reset. Restarted at the end of this function.
+    if(analysisThread) analysisThread->stopThread(2000);
+    fftPos=0; hopCounter=0; prevMono=0;
     // Size the width delay line for up to ~50ms at this sample rate so Haas/decorrelation modes
     // have enough room to use musically real delay times (see applyWidth in processBlock).
-    widthBufSize = juce::jmax(64,(int)std::round(sr*0.05)+8); widthDelay.assign((size_t)widthBufSize,0.f); widthWriteIdx=0;
+    widthBufSize = juce::jmax(64,(int)std::round(sr.load()*0.05)+8); widthDelay.assign((size_t)widthBufSize,0.f); widthWriteIdx=0;
     for(int i=0;i<kBands;++i){float t=i/float(kBands-1); bandHz[i]=std::exp(std::log(20.f)+t*(std::log(20000.f)-std::log(20.f)));}
-    stStereoL.fill({});stStereoR.fill({});stMid.fill({});stSide.fill({}); manualStateL={}; manualStateR={}; manualStateMid={}; manualStateSide={};
+    stStereoL.fill({});stStereoR.fill({});stMid.fill({});stSide.fill({}); manualStateL.fill({}); manualStateR.fill({}); manualStateMid.fill({}); manualStateSide.fill({});
+    // FIX (B1): per-block scratch for this block's raw mid/side samples, handed to the analysis
+    // thread once per block instead of written into the FFT history one sample at a time inline.
+    blockMid.assign((size_t)juce::jmax(64,samplesPerBlock),0.f); blockSide.assign((size_t)juce::jmax(64,samplesPerBlock),0.f);
+    analysisFifo.reset();
+    if(!analysisThread) analysisThread = std::make_unique<PQAnalysisThread>(*this);
+    analysisThread->startThread();
     dirty.store(true); manualDirty.store(true); rebuildCoefficients(); rebuildManualCoefficients();
 }
 
@@ -49,7 +102,11 @@ void PQAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
     if(manualDirty.exchange(false)) rebuildManualCoefficients();
     const float inGain=juce::Decibels::decibelsToGain(inputTrimDb.load());
     const float outGain=juce::Decibels::decibelsToGain(outputTrimDb.load());
+    const double srv=sr.load();
     float inPeakLin=0.f, outPeakLin=0.f;
+    // FIX (B1): defensive resize - a host block bigger than the samplesPerBlock prepareToPlay() sized
+    // blockMid/blockSide for (rare, but not forbidden by the API) would otherwise overrun them below.
+    if((int)blockMid.size()<n){ blockMid.assign((size_t)n,0.f); blockSide.assign((size_t)n,0.f); }
     for(int i=0;i<n;++i){
         float L=b.getSample(0,i)*inGain, R=(trueMono?L:b.getSample(1,i)*inGain); inSum += .5f*(L*L+R*R);
         inPeakLin = juce::jmax(inPeakLin, std::abs(L), std::abs(R));
@@ -60,7 +117,7 @@ void PQAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
             if(widthAmt<=0.0001f) return;
             float monoIn = trueMono ? Lx : 0.5f*(Lx+Rx);
             widthDelay[(size_t)widthWriteIdx]=monoIn;
-            auto msToSamples=[&](float ms){ return juce::jlimit(1,widthBufSize-1,(int)std::round(ms*0.001f*(float)sr)); };
+            auto msToSamples=[&](float ms){ return juce::jlimit(1,widthBufSize-1,(int)std::round(ms*0.001f*(float)srv)); };
             auto tapAt=[&](int samplesBack){ int idx=widthWriteIdx-samplesBack; while(idx<0) idx+=widthBufSize; return widthDelay[(size_t)idx]; };
             float side=0.f;
             switch(wMode){
@@ -81,7 +138,9 @@ void PQAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
         float m=.5f*(L+R), s=.5f*(L-R);
         // Analyzer/reference matching always sees the raw, pre-correction M/S content, regardless of
         // solo state - soloing a band to listen to it never affects what the analyzer measures.
-        fftMid[(size_t)fftPos]=m; fftSide[(size_t)fftPos]=s;
+        // FIX (B1): staged here for the background analysis thread (see the FIFO push after this
+        // loop) instead of written straight into the FFT history inline on the audio thread.
+        blockMid[(size_t)i]=m; blockSide[(size_t)i]=s;
 
         // FIX (item 4): coefficients must stay current regardless of which legs are on/off (e.g.
         // Mid muted but Side/Stereo still need up-to-date correction), so this now runs unconditionally
@@ -127,11 +186,20 @@ void PQAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
         L*=outGain; R*=outGain;
         b.setSample(0,i,L); if(ch>1)b.setSample(1,i,R); outSum += .5f*(L*L+R*R);
         outPeakLin = juce::jmax(outPeakLin, std::abs(L), std::abs(R));
-        // FIX (analyzer latency): advance the circular history buffer every sample, but only run the
-        // (expensive) analysis every kHopSize samples - a 75% overlap - instead of once per full
-        // kFFTSize block, so the on-screen curve updates ~4x more often with much lower perceived lag.
-        fftPos=(fftPos+1)%kFFTSize;
-        if(++hopCounter>=kHopSize){hopCounter=0; analyzeAndUpdate();}
+    }
+    // FIX (B1): hand this block's staged mid/side samples to the background analysis thread through
+    // the lock-free FIFO, then wake it. Replaces the old per-sample fftMid/fftSide write + inline
+    // analyzeAndUpdate() call that used to run right here on the audio thread every kHopSize samples.
+    // If the FIFO is completely full (thread starved) prepareToWrite silently reports less room than
+    // requested and the newest samples for this block are dropped from analysis only - the audio
+    // itself (already written to `b` above) is never affected.
+    {
+        int start1=0,size1=0,start2=0,size2=0;
+        analysisFifo.prepareToWrite(n,start1,size1,start2,size2);
+        if(size1>0){ std::copy(blockMid.begin(),blockMid.begin()+size1,fifoMid.begin()+start1); std::copy(blockSide.begin(),blockSide.begin()+size1,fifoSide.begin()+start1); }
+        if(size2>0){ std::copy(blockMid.begin()+size1,blockMid.begin()+size1+size2,fifoMid.begin()+start2); std::copy(blockSide.begin()+size1,blockSide.begin()+size1+size2,fifoSide.begin()+start2); }
+        analysisFifo.finishedWrite(size1+size2);
+        if(analysisThread) analysisThread->notify();
     }
     // FIX (meter/match stability): one-pole smoothing block-to-block, both so the new vertical
     // meters don't flicker and so matchGain() (below) isn't reading a noisy instantaneous value.
@@ -148,7 +216,7 @@ void PQAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
         // instead of just the current level. matchGain() below reads these, not the RMS pair, so it
         // can neutralize an actual peak change rather than just an average-loudness one.
         constexpr float kPeakDecayDbPerSec=12.f;
-        const float decayThisBlock = kPeakDecayDbPerSec * (float)n / (float)juce::jmax(1.0,sr);
+        const float decayThisBlock = kPeakDecayDbPerSec * (float)n / (float)juce::jmax(1.0,srv);
         auto updatePeak=[&](std::atomic<float>& peakAtomic,float peakLin){
             float instDb=juce::Decibels::gainToDecibels(peakLin+1e-9f);
             float decayed=peakAtomic.load()-decayThisBlock;
@@ -160,6 +228,7 @@ void PQAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
 }
 
 void PQAudioProcessor::analyzeAndUpdate(){
+    const double srv=sr.load();
     std::array<float,kFFTSize*2> buf{};
     // FIX (graphics quality): the analyzer used to look up a single nearest FFT bin per on-screen
     // point. That made low frequencies look like a staircase (many points sharing one wide bin
@@ -183,7 +252,7 @@ void PQAudioProcessor::analyzeAndUpdate(){
             float t=i/float(kBins-1);
             float tLo = (i==0) ? t : 0.5f*(t + (i-1)/float(kBins-1));
             float tHi = (i==kBins-1) ? t : 0.5f*(t + (i+1)/float(kBins-1));
-            float binPosLo = hzAt(tLo)*kFFTSize/sr, binPosHi = hzAt(tHi)*kFFTSize/sr;
+            float binPosLo = hzAt(tLo)*kFFTSize/srv, binPosHi = hzAt(tHi)*kFFTSize/srv;
             double sumPow;
             // FIX (item 7 - low end still "pixelated"): the real FFT bin spacing is sr/kFFTSize
             // (~2.7Hz even at the bigger 16384-point size). Below a few hundred Hz, one on-screen
@@ -228,11 +297,17 @@ void PQAudioProcessor::analyzeAndUpdate(){
     if(hasReference.load()){buildCorrection(corrMid,refMid,liveMid,midMatch.load());buildCorrection(corrSide,refSide,liveSide,sideMatch.load());buildCorrection(corrStereo,refStereo,liveStereo,stereoMatch.load());dirty.store(true);}
 }
 
-void PQAudioProcessor::buildCorrection(std::array<float,kBands>& out,const std::array<std::atomic<float>,kBins>& ref,const std::array<float,kBins>& live,float amount){
+// FIX (B1): `out` is now an atomic array (see header) - buildCorrection now runs on the background
+// analysis thread while rebuildCoefficients() reads it on the audio thread. The old
+// `auto c=out;` snapshot-copy trick no longer compiles (std::atomic isn't copyable), so the raw
+// pre-smoothing values are staged in a plain local array instead, and only the final smoothed result
+// is stored into the atomics.
+void PQAudioProcessor::buildCorrection(std::array<std::atomic<float>,kBands>& out,const std::array<std::atomic<float>,kBins>& ref,const std::array<float,kBins>& live,float amount){
     float lo=juce::jlimit(20.f,20000.f,lowHz.load()), hi=juce::jlimit(lo,20000.f,highHz.load()), cap=juce::jlimit(0.f,kMaxCap,maxCorrectionDb.load()), amt=juce::jlimit(0.f,1.f,amount);
-    for(int i=0;i<kBands;++i){float h=bandHz[i];float d=(h>=lo&&h<=hi)?interpAtomic(ref,h)-interp(live,h):0;out[i]=juce::jlimit(-cap,cap,d)*amt;}
-    const int radius=juce::jlimit(1,8,(int)std::round(smoothingOctaves.load()*4.f)); auto c=out;
-    for(int i=0;i<kBands;++i){float sum=0,w=0;for(int j=juce::jmax(0,i-radius);j<=juce::jmin(kBands-1,i+radius);++j){float q=float(j-i)/radius,ww=std::exp(-2*q*q);sum+=c[j]*ww;w+=ww;}out[i]=sum/w;}
+    std::array<float,kBands> raw{};
+    for(int i=0;i<kBands;++i){float h=bandHz[i];float d=(h>=lo&&h<=hi)?interpAtomic(ref,h)-interp(live,h):0;raw[(size_t)i]=juce::jlimit(-cap,cap,d)*amt;}
+    const int radius=juce::jlimit(1,8,(int)std::round(smoothingOctaves.load()*4.f));
+    for(int i=0;i<kBands;++i){float sum=0,w=0;for(int j=juce::jmax(0,i-radius);j<=juce::jmin(kBands-1,i+radius);++j){float q=float(j-i)/radius,ww=std::exp(-2*q*q);sum+=raw[(size_t)j]*ww;w+=ww;}out[(size_t)i].store(sum/w);}
 }
 
 PQAudioProcessor::Coeff PQAudioProcessor::peak(float hz,float gainDb,float Q,float sampleRate){double A=std::pow(10.0,gainDb/40.0),w=2.0*juce::MathConstants<double>::pi*hz/sampleRate,alpha=std::sin(w)/(2.0*Q),c=std::cos(w);double b0=1+alpha*A,b1=-2*c,b2=1-alpha*A,a0=1+alpha/A,a1=-2*c,a2=1-alpha/A;return {(float)(b0/a0),(float)(b1/a0),(float)(b2/a0),(float)(a1/a0),(float)(a2/a0)};}
@@ -259,9 +334,9 @@ PQAudioProcessor::Coeff PQAudioProcessor::makeManualCoeff(ManualType type,float 
     return {(float)(b0/a0),(float)(b1/a0),(float)(b2/a0),(float)(a1/a0),(float)(a2/a0)};
 }
 // Single first-order (6dB/oct) high-pass ("cuts lows") or low-pass ("cuts highs") stage - the
-// bilinear-transformed RC filter, expressed with b2=a2=0 so it drops straight into the same
-// biquad process() used everywhere else (the transposed-direct-form-II recursion degrades cleanly
-// to a true first order when the z^-2 terms are zero).
+// bilinear-transformed RC filter, expressed with b2=a2=0 so it drops straight into the same biquad
+// process() used everywhere else (the transposed-direct-form-II recursion degrades cleanly to a true
+// first order when the z^-2 terms are zero).
 PQAudioProcessor::Coeff PQAudioProcessor::make1PoleCut(bool highpass,float hz,double sampleRate){
     if(sampleRate<=0.0) sampleRate=44100.0;
     hz=juce::jlimit(20.f,20000.f,hz);
@@ -271,28 +346,28 @@ PQAudioProcessor::Coeff PQAudioProcessor::make1PoleCut(bool highpass,float hz,do
     return {(float)b0,(float)b1,0.f,(float)a1,0.f};
 }
 void PQAudioProcessor::rebuildManualCoefficients(){
+    const double srv=sr.load();
     // Which slope steps need a leading 1-pole (6dB/oct) stage before their whole 2-pole (12dB/oct)
-    // stages: 6dB/oct is just the 1-pole alone; 18dB/oct is 6+12; the rest (12/24/36/48) are an
-    // exact number of 2-pole stages with no odd stage needed.
+    // stages: 6dB/oct is just the 1-pole alone; 18dB/oct is 6+12; every other step in
+    // kCutSlopeSteps is an exact number of 2-pole stages with no odd stage needed.
     for(int i=0;i<kMaxManualBands;++i){ auto& mb=manualBands[(size_t)i];
         auto type=mb.type.load(); float hz=mb.freq.load(), gain=mb.gainDb.load(), q=mb.q.load();
         if(type==ManualType::LowCut || type==ManualType::HighCut){
             const bool highpass = (type==ManualType::LowCut);
-            const int order = juce::jlimit(6,48,mb.slopeOrder.load());
+            const int order = juce::jlimit(6,96,mb.slopeOrder.load());
             const bool leadingOnePole = (order==6 || order==18);
             const int twoPoleStages = (order - (leadingOnePole?6:0)) / 12;
             int st=0;
-            if(leadingOnePole) manualCoeff[(size_t)i][(size_t)st++]=make1PoleCut(highpass,hz,sr);
-            // FIX: earlier this reused makeManualCoeff() with a fixed Q for every 2-pole stage,
-            // but rebuilding each stage from a fresh alpha=sin(w)/(2Q) at the *same* frequency
-            // makes every stage in the cascade identical anyway, so a plain loop of the same call
-            // is exactly right here (no separate per-stage Q table needed for a Butterworth-ish
+            if(leadingOnePole) manualCoeff[(size_t)i][(size_t)st++]=make1PoleCut(highpass,hz,srv);
+            // FIX: rebuilding each stage from a fresh alpha=sin(w)/(2Q) at the *same* frequency makes
+            // every stage in the cascade identical anyway, so a plain loop of the same call is
+            // exactly right here (no separate per-stage Q table needed for a Butterworth-ish
             // approximation - this is a deliberate simplification, not a bug: true maximally-flat
             // higher-order filters stagger Q per stage, this cascades identical 0.7071 stages).
-            for(int k=0;k<twoPoleStages;++k) manualCoeff[(size_t)i][(size_t)st++]=makeManualCoeff(type,hz,0.f,0.7071f,sr);
+            for(int k=0;k<twoPoleStages && st<kMaxCutStages;++k) manualCoeff[(size_t)i][(size_t)st++]=makeManualCoeff(type,hz,0.f,0.7071f,srv);
             manualStageCount[(size_t)i]=st;
         } else {
-            manualCoeff[(size_t)i][0]=makeManualCoeff(type,hz,gain,q,sr);
+            manualCoeff[(size_t)i][0]=makeManualCoeff(type,hz,gain,q,srv);
             manualStageCount[(size_t)i]=1;
         }
     }
@@ -302,15 +377,15 @@ int PQAudioProcessor::addManualBand(ManualType type,float freq,float gainDb,floa
         if(!mb.active.load()){
             mb.type.store(type); mb.target.store(target); mb.freq.store(juce::jlimit(20.f,20000.f,freq)); mb.gainDb.store(juce::jlimit(-24.f,24.f,gainDb)); mb.q.store(juce::jlimit(0.1f,18.f,q)); mb.slopeOrder.store(12);
             // Slot may be reused from a previously deleted band; clear all four possible filter
-            // states (every stage of each) so no stale history from that old band (or an old
-            // target, or a higher-order slope with more active stages) leaks in.
+            // states (every stage of each) so no stale history from that old band (or an old target,
+            // or a higher-order slope with more active stages) leaks in.
             manualStateL[(size_t)i]={}; manualStateR[(size_t)i]={}; manualStateMid[(size_t)i]={}; manualStateSide[(size_t)i]={};
-            mb.active.store(true); manualDirty.store(true); return i;
+            mb.active.store(true); manualDirty.store(true); presetDirty.store(true); return i;
         }
     }
     return -1; // no free slot (kMaxManualBands reached)
 }
-void PQAudioProcessor::removeManualBand(int index){ if(index<0||index>=kMaxManualBands)return; manualBands[(size_t)index].active.store(false); manualDirty.store(true); }
+void PQAudioProcessor::removeManualBand(int index){ if(index<0||index>=kMaxManualBands)return; manualBands[(size_t)index].active.store(false); manualDirty.store(true); presetDirty.store(true); }
 void PQAudioProcessor::setManualBandTarget(int index,ManualTarget target){
     if(index<0||index>=kMaxManualBands)return; auto& mb=manualBands[(size_t)index];
     if(mb.target.load()==target) return;
@@ -318,11 +393,12 @@ void PQAudioProcessor::setManualBandTarget(int index,ManualTarget target){
     // Reset every path's state on the switch (see header comment on setManualBandTarget) so the
     // band starts clean on its new signal instead of continuing from unrelated filter history.
     manualStateL[(size_t)index]={}; manualStateR[(size_t)index]={}; manualStateMid[(size_t)index]={}; manualStateSide[(size_t)index]={};
+    presetDirty.store(true);
 }
-void PQAudioProcessor::setManualBand(int index,ManualType type,float freq,float gainDb,float q){ if(index<0||index>=kMaxManualBands)return; auto& mb=manualBands[(size_t)index]; mb.type.store(type); mb.freq.store(juce::jlimit(20.f,20000.f,freq)); mb.gainDb.store(juce::jlimit(-24.f,24.f,gainDb)); mb.q.store(juce::jlimit(0.1f,18.f,q)); manualDirty.store(true); }
-void PQAudioProcessor::setManualBandType(int index,ManualType type){ if(index<0||index>=kMaxManualBands)return; manualBands[(size_t)index].type.store(type); manualDirty.store(true); }
-void PQAudioProcessor::setManualBandFreqGain(int index,float freq,float gainDb){ if(index<0||index>=kMaxManualBands)return; auto& mb=manualBands[(size_t)index]; mb.freq.store(juce::jlimit(20.f,20000.f,freq)); mb.gainDb.store(juce::jlimit(-24.f,24.f,gainDb)); manualDirty.store(true); }
-void PQAudioProcessor::setManualBandQ(int index,float q){ if(index<0||index>=kMaxManualBands)return; manualBands[(size_t)index].q.store(juce::jlimit(0.1f,18.f,q)); manualDirty.store(true); }
+void PQAudioProcessor::setManualBand(int index,ManualType type,float freq,float gainDb,float q){ if(index<0||index>=kMaxManualBands)return; auto& mb=manualBands[(size_t)index]; mb.type.store(type); mb.freq.store(juce::jlimit(20.f,20000.f,freq)); mb.gainDb.store(juce::jlimit(-24.f,24.f,gainDb)); mb.q.store(juce::jlimit(0.1f,18.f,q)); manualDirty.store(true); presetDirty.store(true); }
+void PQAudioProcessor::setManualBandType(int index,ManualType type){ if(index<0||index>=kMaxManualBands)return; manualBands[(size_t)index].type.store(type); manualDirty.store(true); presetDirty.store(true); }
+void PQAudioProcessor::setManualBandFreqGain(int index,float freq,float gainDb){ if(index<0||index>=kMaxManualBands)return; auto& mb=manualBands[(size_t)index]; mb.freq.store(juce::jlimit(20.f,20000.f,freq)); mb.gainDb.store(juce::jlimit(-24.f,24.f,gainDb)); manualDirty.store(true); presetDirty.store(true); }
+void PQAudioProcessor::setManualBandQ(int index,float q){ if(index<0||index>=kMaxManualBands)return; manualBands[(size_t)index].q.store(juce::jlimit(0.1f,18.f,q)); manualDirty.store(true); presetDirty.store(true); }
 void PQAudioProcessor::setManualBandSlope(int index,int slopeOrderDbPerOct){
     if(index<0||index>=kMaxManualBands)return;
     // Snap to the nearest defined step rather than trusting the caller's exact number, so a stray
@@ -330,12 +406,16 @@ void PQAudioProcessor::setManualBandSlope(int index,int slopeOrderDbPerOct){
     auto diff=[](int a,int b){ int d=a-b; return d<0?-d:d; };
     int best=kCutSlopeSteps[0], bestDiff=diff(slopeOrderDbPerOct,best);
     for(int s:kCutSlopeSteps){ int d=diff(slopeOrderDbPerOct,s); if(d<bestDiff){bestDiff=d;best=s;} }
-    manualBands[(size_t)index].slopeOrder.store(best); manualDirty.store(true);
+    manualBands[(size_t)index].slopeOrder.store(best); manualDirty.store(true); presetDirty.store(true);
 }
 
-void PQAudioProcessor::rebuildCoefficients(){if(sr<=0)return;for(int i=0;i<kBands;++i){stereoCoeff[i]=peak(bandHz[i],corrStereo[i],.8f,(float)sr);midCoeff[i]=peak(bandHz[i],corrMid[i],.8f,(float)sr);sideCoeff[i]=peak(bandHz[i],corrSide[i],.8f,(float)sr);}generation.fetch_add(1);}
-void PQAudioProcessor::captureReference(){for(int i=0;i<kBins;++i){refStereo[i].store(stereoCurve[i].load());refMid[i].store(midCurve[i].load());refSide[i].store(sideCurve[i].load());}hasReference.store(true);applyMatch();}
-void PQAudioProcessor::clearReference(){hasReference.store(false);corrStereo.fill(0);corrMid.fill(0);corrSide.fill(0);dirty.store(true);}
+void PQAudioProcessor::rebuildCoefficients(){
+    double srv=sr.load(); if(srv<=0)return;
+    for(int i=0;i<kBands;++i){stereoCoeff[i]=peak(bandHz[i],corrStereo[(size_t)i].load(),.8f,(float)srv);midCoeff[i]=peak(bandHz[i],corrMid[(size_t)i].load(),.8f,(float)srv);sideCoeff[i]=peak(bandHz[i],corrSide[(size_t)i].load(),.8f,(float)srv);}
+    generation.fetch_add(1);
+}
+void PQAudioProcessor::captureReference(){for(int i=0;i<kBins;++i){refStereo[i].store(stereoCurve[i].load());refMid[i].store(midCurve[i].load());refSide[i].store(sideCurve[i].load());}hasReference.store(true);applyMatch();presetDirty.store(true);}
+void PQAudioProcessor::clearReference(){hasReference.store(false);for(auto& x:corrStereo)x.store(0.f);for(auto& x:corrMid)x.store(0.f);for(auto& x:corrSide)x.store(0.f);dirty.store(true);presetDirty.store(true);}
 void PQAudioProcessor::applyMatch(){if(!hasReference.load())return;buildCorrection(corrMid,refMid,liveMid,midMatch.load());buildCorrection(corrSide,refSide,liveSide,sideMatch.load());buildCorrection(corrStereo,refStereo,liveStereo,stereoMatch.load());dirty.store(true);}
 
 // "MATCH GAIN": nudges outputTrimDb so the (already-trimmed) output's true peak reads the same as
@@ -347,6 +427,7 @@ void PQAudioProcessor::applyMatch(){if(!hasReference.load())return;buildCorrecti
 void PQAudioProcessor::matchGain(){
     float diff=inputPeakDb.load()-outputPeakDb.load();
     outputTrimDb.store(juce::jlimit(-24.f,24.f,outputTrimDb.load()+diff));
+    presetDirty.store(true);
 }
 
 // FIX (item 6): a "preset" is now defined as the *entire* plugin state - reference curves, manual
@@ -355,7 +436,9 @@ void PQAudioProcessor::matchGain(){
 // session save/restore, so there is only ever one serialization format to keep correct.
 bool PQAudioProcessor::saveReference(const juce::File& f){
     juce::MemoryBlock mb; getStateInformation(mb);
-    return f.replaceWithData(mb.getData(),mb.getSize());
+    bool ok = f.replaceWithData(mb.getData(),mb.getSize());
+    if(ok) presetDirty.store(false); // FIX (B2): a successful save is the new "clean" baseline
+    return ok;
 }
 bool PQAudioProcessor::loadReference(const juce::File& f){
     juce::MemoryBlock mb; if(!f.loadFileAsData(mb))return false;
@@ -386,7 +469,7 @@ bool PQAudioProcessor::applyStateBlock(const void* data,int size){
         if(in.readInt()!=kBins) return false;
         for(auto* a:{&refStereo,&refMid,&refSide}) for(int i=0;i<kBins;++i) (*a)[(size_t)i].store(in.readFloat());
         lowHz.store(in.readFloat());highHz.store(in.readFloat());maxCorrectionDb.store(in.readFloat());smoothingOctaves.store(in.readFloat());
-        hasReference.store(true); applyMatch(); return true;
+        hasReference.store(true); applyMatch(); presetDirty.store(false); return true;
     }
     if(magic!=0x50515339 && magic!=0x50515338 && magic!=0x50515337 && magic!=0x50515336 && magic!=0x50515335 && magic!=0x50515334 && magic!=0x50515333 && magic!=0x50515332) return false; // unknown/corrupt state: ignore rather than risk misreading garbage into the DSP
     bool hasSlopeOrder = (magic==0x50515339);
@@ -422,6 +505,7 @@ bool PQAudioProcessor::applyStateBlock(const void* data,int size){
     // state load regardless of what the user last had checked. Leave them as whatever they already
     // are - since they're not written/read in this state block, that's simply their pre-load value.
     applyMatch();
+    presetDirty.store(false); // FIX (B2): a freshly loaded preset/session is the new "clean" baseline
     return true;
 }
 juce::AudioProcessorEditor* PQAudioProcessor::createEditor(){return new PQAudioProcessorEditor(*this);}
