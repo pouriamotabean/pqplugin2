@@ -307,6 +307,43 @@ void PQAudioProcessor::analyzeAndUpdate(){
         liveStereo[i]=juce::Decibels::gainToDecibels(std::sqrt(m*m+s*s)+1e-9f);
         smoothStore(stereoCurve,liveStereo[i],i); smoothStore(midCurve,liveMid[i],i); smoothStore(sideCurve,liveSide[i],i);
     }
+    // I1: average this frame's raw (unsmoothed) spectrum into the capture accumulators, in power
+    // domain (linear amplitude squared) so the average is a proper RMS-style average once converted
+    // back to dB at the end - averaging dB values directly would be mathematically wrong (biased
+    // toward whichever frame happened to be quietest).
+    {
+        bool capturing=capturingReference.load();
+        if(capturing && !captureWasActive){
+            for(auto& v:captureAccumStereo) v=0.0; for(auto& v:captureAccumMid) v=0.0; for(auto& v:captureAccumSide) v=0.0;
+            captureFrameCount=0; captureElapsedSec=0.0; captureProgress.store(0.f);
+        }
+        captureWasActive=capturing;
+        if(capturing){
+            for(int i=0;i<kBins;++i){
+                float gStereo=juce::Decibels::decibelsToGain(liveStereo[i]), gMid=juce::Decibels::decibelsToGain(liveMid[i]), gSide=juce::Decibels::decibelsToGain(liveSide[i]);
+                captureAccumStereo[(size_t)i]+=(double)gStereo*gStereo;
+                captureAccumMid[(size_t)i]+=(double)gMid*gMid;
+                captureAccumSide[(size_t)i]+=(double)gSide*gSide;
+            }
+            ++captureFrameCount;
+            captureElapsedSec += (double)kHopSize/juce::jmax(1.0,srv);
+            float dur=juce::jmax(0.5f,captureDurationSec.load());
+            captureProgress.store((float)juce::jlimit(0.0,1.0,captureElapsedSec/dur));
+            if(captureElapsedSec>=dur){
+                int n=juce::jmax(1,captureFrameCount);
+                for(int i=0;i<kBins;++i){
+                    refStereo[(size_t)i].store(juce::Decibels::gainToDecibels((float)std::sqrt(captureAccumStereo[(size_t)i]/n)+1e-9f));
+                    refMid[(size_t)i].store(juce::Decibels::gainToDecibels((float)std::sqrt(captureAccumMid[(size_t)i]/n)+1e-9f));
+                    refSide[(size_t)i].store(juce::Decibels::gainToDecibels((float)std::sqrt(captureAccumSide[(size_t)i]/n)+1e-9f));
+                }
+                hasReference.store(true);
+                capturingReference.store(false);
+                presetDirty.store(true);
+                // applyMatch() below (already unconditional) picks up the freshly-stored reference
+                // immediately, so the correction is ready the instant the capture finishes.
+            }
+        }
+    }
     if(hasReference.load()){buildCorrection(corrMid,refMid,liveMid,midMatch.load());buildCorrection(corrSide,refSide,liveSide,sideMatch.load());buildCorrection(corrStereo,refStereo,liveStereo,stereoMatch.load());dirty.store(true);}
 }
 
@@ -427,8 +464,11 @@ void PQAudioProcessor::rebuildCoefficients(){
     for(int i=0;i<kBands;++i){stereoCoeff[i]=peak(bandHz[i],corrStereo[(size_t)i].load(),.8f,(float)srv);midCoeff[i]=peak(bandHz[i],corrMid[(size_t)i].load(),.8f,(float)srv);sideCoeff[i]=peak(bandHz[i],corrSide[(size_t)i].load(),.8f,(float)srv);}
     generation.fetch_add(1);
 }
-void PQAudioProcessor::captureReference(){for(int i=0;i<kBins;++i){refStereo[i].store(stereoCurve[i].load());refMid[i].store(midCurve[i].load());refSide[i].store(sideCurve[i].load());}hasReference.store(true);applyMatch();presetDirty.store(true);}
-void PQAudioProcessor::clearReference(){hasReference.store(false);for(auto& x:corrStereo)x.store(0.f);for(auto& x:corrMid)x.store(0.f);for(auto& x:corrSide)x.store(0.f);dirty.store(true);presetDirty.store(true);}
+// I1: starts a timed averaging capture instead of grabbing one instantaneous frame. Just flips the
+// flag - the actual reset-and-accumulate work happens on the analysis thread itself, in
+// analyzeAndUpdate() below, so these accumulator buffers are never touched from two threads at once.
+void PQAudioProcessor::captureReference(){ if(!capturingReference.load()) capturingReference.store(true); }
+void PQAudioProcessor::clearReference(){hasReference.store(false);capturingReference.store(false);for(auto& x:corrStereo)x.store(0.f);for(auto& x:corrMid)x.store(0.f);for(auto& x:corrSide)x.store(0.f);dirty.store(true);presetDirty.store(true);}
 void PQAudioProcessor::applyMatch(){if(!hasReference.load())return;buildCorrection(corrMid,refMid,liveMid,midMatch.load());buildCorrection(corrSide,refSide,liveSide,sideMatch.load());buildCorrection(corrStereo,refStereo,liveStereo,stereoMatch.load());dirty.store(true);}
 
 // "MATCH GAIN": nudges outputTrimDb so the (already-trimmed) output's true peak reads the same as
