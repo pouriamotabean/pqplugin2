@@ -83,6 +83,17 @@ private:
  // chart can be decluttered once a target's editing is finished (still edited via checking it back
  // on - hiding never touches the underlying bands or the audio, purely a display filter).
  CircleToggle stereoEqToggle,midEqToggle,sideEqToggle;
+ // FIX (manual-EQ target now driven purely by the three toggles): the toggles used to be a pure
+ // display filter, with every newly-added node hardcoded to ManualTarget::Stereo (you then had to
+ // right-click -> "Move To" to get a Mid/Side node). Now each toggle switch also declares itself the
+ // target for new nodes. Several toggles can be on at once (each shows/edits its own curve
+ // independently), so we keep a small recency stack: the most recently switched-on toggle is where
+ // new left-click/right-click-add nodes go. Switching a toggle off removes it from the stack; if none
+ // are on, clicking the chart adds nothing (nothing is "armed" to receive it).
+ juce::Array<PQAudioProcessor::ManualTarget> activeManualTargets;
+ void updateActiveTargetStack(PQAudioProcessor::ManualTarget t, bool on);
+ bool hasActiveManualTarget() const { return !activeManualTargets.isEmpty(); }
+ PQAudioProcessor::ManualTarget currentManualTarget() const { return activeManualTargets.getLast(); }
  BigPopupLookAndFeel bigMenuLnf;
  void timerCallback()override{repaint();} void setupButton(juce::TextButton&,juce::Colour); void setupSlider(juce::Slider&,double,double,double); void setupVerticalTrim(juce::Slider&); void label(juce::Graphics&,juce::String,juce::Rectangle<float>,juce::Colour);
  void refreshBandButtons();
