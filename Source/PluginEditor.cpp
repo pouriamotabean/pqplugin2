@@ -270,13 +270,16 @@ void PQAudioProcessorEditor::drawCurve(juce::Graphics&g,juce::Rectangle<float>r,
      prev=cur;
  }
  q.lineTo(prev);
- // FIX (glow + shadow request): a soft dark drop-shadow first (same DropShadow technique already
- // used under the chart panel itself), offset slightly down so the line reads as "lifted" off the
- // background, THEN the colour glow fill, THEN the line on top - shadow gives depth, glow gives
- // colour, matching both effects the reference asked for stacked together.
- juce::DropShadow curveShadow(juce::Colours::black.withAlpha(0.5f),9,juce::Point<int>(0,3));
- curveShadow.drawForPath(g,q);
- glowUnder(g,q,r.getBottom(),r.getX(),r.getRight(),c);
+ // FIX (bug: giant diagonal shadow triangle) - DropShadow::drawForPath() FILLS whatever path you
+ // give it before blurring it. `q` here is an open polyline (left edge of the chart to the right
+ // edge) with no closing segment, so JUCE was implicitly closing it with a straight line from the
+ // last point back to the first - exactly the diagonal edge that was showing up as a huge black
+ // triangle. The fix is to shadow the actual STROKED ribbon-shape of the line (its outline as a thin
+ // closed shape hugging the curve on both sides) instead of the raw center-line path.
+ juce::Path strokeShape; juce::PathStrokeType(1.8f).createStrokedPath(strokeShape,q);
+ juce::DropShadow curveShadow(juce::Colours::black.withAlpha(0.55f),8,juce::Point<int>(0,3));
+ curveShadow.drawForPath(g,strokeShape);
+ glowUnder(g,q,r.getBottom(),r.getX(),r.getRight(),c,0.32f);
  g.setColour(c);g.strokePath(q,juce::PathStrokeType(1.8f));
 }
 void PQAudioProcessorEditor::drawRef(juce::Graphics&g,juce::Rectangle<float>r,const std::array<std::atomic<float>,PQAudioProcessor::kBins>&a,juce::Colour c){
@@ -431,10 +434,13 @@ void PQAudioProcessorEditor::drawManualEq(juce::Graphics& g){
             float x=freqToX(hz), y=gainDbToY((float)computeDb(target,hz));
             if(px==0) curve.startNewSubPath(x,y); else curve.lineTo(x,y);
         }
-        // FIX (glow request): same treatment as the live analyzer curves (see drawCurve/glowUnder),
-        // just a touch dimmer since this curve already sits on top of the analyzer's own glow.
-        glowUnder(g,curve,chartArea.getBottom(),chartArea.getX(),chartArea.getRight(),c,0.16f);
-        g.setColour(c.withAlpha(0.85f)); g.strokePath(curve, juce::PathStrokeType(2.0f));
+        // FIX (shadow bug + glow strength): same fixed shadow technique as drawCurve (stroked
+        // outline, not the raw open path - see the comment there for why), and the glow bumped up
+        // from a barely-visible 0.16 to something that actually reads next to the analyzer's own.
+        juce::Path curveStrokeShape; juce::PathStrokeType(2.0f).createStrokedPath(curveStrokeShape,curve);
+        juce::DropShadow(juce::Colours::black.withAlpha(0.4f),6,juce::Point<int>(0,2)).drawForPath(g,curveStrokeShape);
+        glowUnder(g,curve,chartArea.getBottom(),chartArea.getX(),chartArea.getRight(),c,0.26f);
+        g.setColour(c.withAlpha(0.9f)); g.strokePath(curve, juce::PathStrokeType(2.0f));
     };
     drawTargetCurve(MT::Stereo, manualStereoColour());
     drawTargetCurve(MT::Mid, manualMidColour());
@@ -568,12 +574,18 @@ void PQAudioProcessorEditor::showAddBandMenu(juce::Point<float> chartPos, juce::
 }
 
 void PQAudioProcessorEditor::paint(juce::Graphics&g){
- // FIX (graphic redesign): flat black read as a bit lifeless next to the reference direction - a
- // very subtle top-to-bottom gradient (barely lighter, cool-toned, at the top) gives the window a
- // touch of depth without introducing any new bright colour into the palette.
- juce::ColourGradient bgGrad(juce::Colour(0xff11151b),0,0,juce::Colour(0xff05060a),0,(float)getHeight(),false);
+ // FIX ("still looks the same" feedback): the previous gradient was too subtle to register as a
+ // change at all. Pushed the contrast much further - a noticeably lighter cool navy at the top,
+ // fading to near-black - plus a soft radial glow seated behind the chart (like a light source),
+ // which is what actually reads as "premium" rather than a barely-there tint.
+ juce::ColourGradient bgGrad(juce::Colour(0xff1c2530),0,0,juce::Colour(0xff030406),0,(float)getHeight(),false);
  g.setGradientFill(bgGrad); g.fillRect(getLocalBounds());
  auto a=getLocalBounds().toFloat();
+ {
+     juce::ColourGradient glow(juce::Colour(0xff2a3f66).withAlpha(0.35f),a.getCentreX(),40.f,
+                                juce::Colour(0xff2a3f66).withAlpha(0.f),a.getCentreX(),a.getHeight()*0.55f,false);
+     g.setGradientFill(glow); g.fillRect(getLocalBounds());
+ }
  // FIX (fonts request - "PQ" specifically): bumped a size, added letter-spacing (kerning), and a
  // soft white-to-cool-blue gradient fill instead of flat white, so the wordmark reads a bit more
  // like a designed logo and less like a plain bold label.
@@ -586,7 +598,14 @@ void PQAudioProcessorEditor::paint(juce::Graphics&g){
      g.drawText("PQ",28,18,66,36,juce::Justification::left);
  }
  g.setFont(juce::Font(juce::FontOptions(10)).withExtraKerningFactor(0.02f));g.setColour(muted());g.drawText("PERFECTION OF MATCH EQ   /   POURIA MOTABEAN",91,25,420,22,juce::Justification::left);
- auto chart=a.reduced(24,72).withHeight(a.getHeight()*.48f);
+ // FIX (layout - meters move beside the chart, matching the reference): the analyzer chart is now
+ // narrower, with a small dedicated panel reserved on its right for IN/OUT + MATCH GAIN, instead of
+ // those living down in the "FREQUENCY RANGE" box. Split identically in resized() below, since that's
+ // where the actual meter/trim/button components get their bounds.
+ auto chartFull=a.reduced(24,72).withHeight(a.getHeight()*.48f);
+ auto meterPanel=chartFull.removeFromRight(120.f);
+ chartFull.removeFromRight(16.f); // gap between chart and meter panel
+ auto chart=chartFull;
  // Drop shadow under the analyzer panel, drawn before the panel itself so the panel sits on top of it.
  {
      juce::Path chartShadowPath; chartShadowPath.addRoundedRectangle(chart,14.f);
@@ -619,14 +638,27 @@ void PQAudioProcessorEditor::paint(juce::Graphics&g){
  g.restoreState();
  label(g,"20 Hz",{chart.getX(),chart.getBottom()-18,60,18},muted());label(g,"1 kHz",{chart.getCentreX()-25,chart.getBottom()-18,50,18},muted());label(g,"20 kHz",{chart.getRight()-60,chart.getBottom()-18,60,18},muted());
  label(g,"CLICK: ADD BAND   RIGHT-CLICK: TYPE+TARGET/DELETE   DRAG: FREQ+GAIN   SCROLL: Q   DEL: REMOVE SELECTED",{chart.getX(),chart.getY()-16,700,14},muted());
- g.setColour(panel());g.fillRoundedRectangle(24,chart.getBottom()+32,a.getWidth()-48,a.getHeight()-chart.getBottom()-56,14);
+ {
+     auto ctrlPanel=juce::Rectangle<float>(24.f,chart.getBottom()+32.f,a.getWidth()-48.f,a.getHeight()-chart.getBottom()-56.f);
+     juce::ColourGradient panelGrad(juce::Colour(0xff141a22),ctrlPanel.getX(),ctrlPanel.getY(),juce::Colour(0xff0c0f14),ctrlPanel.getX(),ctrlPanel.getBottom(),false);
+     g.setGradientFill(panelGrad); g.fillRoundedRectangle(ctrlPanel,14.f);
+ }
  label(g,"MATCH AMOUNT",{42,chart.getBottom()+47,150,18},muted());label(g,"FREQUENCY RANGE",{700,chart.getBottom()+47,180,18},muted());label(g,"MONO → STEREO",{42,chart.getBottom()+153,180,18},muted());
  int y=(int)chart.getBottom()+70;
  label(g,"STEREO",{45,(float)y+2,80,18},white()); label(g,"MID",{45,(float)y+34,80,18},yellow()); label(g,"SIDE",{45,(float)y+66,80,18},blue());
  label(g,"LOW HZ",{700,(float)y+2,100,18},muted()); label(g,"HIGH HZ",{900,(float)y+2,100,18},muted());
  label(g,"MODE",{210,(float)y+100,100,18},muted()); label(g,"WIDTH AMT",{410,(float)y+100,100,18},muted()); label(g,"STAGE",{210,(float)y+132,100,18},muted()); label(g,"DEPTH %",{410,(float)y+132,100,18},muted());
- // Input/output level meters (each doubling as a trim fader - see setupVerticalTrim) plus the
- // MATCH GAIN button sitting between them, replacing the old Max dB / Smoothing sliders here.
+ // FIX (layout - meters relocated beside the chart, per the reference): its own small panel, with
+ // the same shadow+gradient treatment as the main chart/control panels, sitting directly right of
+ // the analyzer instead of buried in the bottom "FREQUENCY RANGE" box.
+ {
+     juce::Path mpShadowPath; mpShadowPath.addRoundedRectangle(meterPanel,14.f);
+     juce::DropShadow mpShadow(juce::Colours::black.withAlpha(0.5f),14,juce::Point<int>(0,5));
+     mpShadow.drawForPath(g,mpShadowPath);
+     juce::ColourGradient mpGrad(juce::Colour(0xff161c25),meterPanel.getX(),meterPanel.getY(),juce::Colour(0xff0a0d12),meterPanel.getX(),meterPanel.getBottom(),false);
+     g.setGradientFill(mpGrad); g.fillRoundedRectangle(meterPanel,14.f);
+     g.setColour(grid()); g.drawRoundedRectangle(meterPanel.reduced(0.5f),14.f,1.f);
+ }
  // FIX ("ناب" cleanup): one label above (just "IN"/"OUT"), one number below (the live level) - the
  // separate always-on TRIM readout is gone; the fader thumb's position on the bar already shows the
  // trim, and this halves the amount of small text crowding the two meters.
@@ -664,10 +696,28 @@ void PQAudioProcessorEditor::resized(){auto a=getLocalBounds();
      bypass.setBounds(groupLeft-12-90,18,90,36);
  }
  stereo.setBounds(a.getRight()-305,18,90,36);mid.setBounds(a.getRight()-207,18,90,36);side.setBounds(a.getRight()-109,18,90,36);
- auto chart=a.reduced(24,72).withHeight(a.getHeight()*.48f);int y=chart.getBottom()+70;sAmt.setBounds(145,y,470,22);mAmt.setBounds(145,y+32,470,22);siAmt.setBounds(145,y+64,470,22);low.setBounds(700,y+18,185,22);high.setBounds(900,y+18,185,22);
- inputMeterArea={700.f,(float)(y+62),70.f,108.f}; outputMeterArea={900.f,(float)(y+62),70.f,108.f};
- inputTrim.setBounds(inputMeterArea.toNearestInt()); outputTrim.setBounds(outputMeterArea.toNearestInt());
- matchGainBtn.setBounds(785,y+101,100,30);
+ // FIX (layout - matches paint()): same chart/meterPanel split, since this is where the actual
+ // meter/trim/button *components* (not just their drawing) get positioned.
+ auto chartFull=a.reduced(24,72).withHeight(a.getHeight()*.48f);
+ auto meterPanel=chartFull.removeFromRight(120.f);
+ chartFull.removeFromRight(16.f);
+ auto chart=chartFull;
+ int y=chart.getBottom()+70;
+ sAmt.setBounds(145,y,470,22);mAmt.setBounds(145,y+32,470,22);siAmt.setBounds(145,y+64,470,22);low.setBounds(700,y+18,185,22);high.setBounds(900,y+18,185,22);
+ // FIX (layout - meters relocated beside the chart): IN bar | OUT bar side by side near the top of
+ // the panel, MATCH GAIN spanning the full width below them - replaces the old fixed 700/900,
+ // y+62-relative spots that used to live down in the "FREQUENCY RANGE" box.
+ {
+     auto mp=meterPanel.reduced(10.f);
+     mp.removeFromTop(18.f); // room for the IN/OUT labels drawn in paint()
+     auto btnRow=mp.removeFromBottom(30.f); mp.removeFromBottom(8.f);
+     mp.removeFromBottom(18.f); // room for the live-level numbers drawn in paint()
+     float gap=12.f, barW=(mp.getWidth()-gap)/2.f;
+     auto inBar=mp.removeFromLeft(barW); mp.removeFromLeft(gap); auto outBar=mp;
+     inputMeterArea=inBar; outputMeterArea=outBar;
+     inputTrim.setBounds(inputMeterArea.toNearestInt()); outputTrim.setBounds(outputMeterArea.toNearestInt());
+     matchGainBtn.setBounds(btnRow.toNearestInt());
+ }
  mode.setBounds(210,y+115,180,25);width.setBounds(410,y+115,250,25);widthStage.setBounds(210,y+147,90,25);depth.setBounds(410,y+147,250,25);capture.setBounds(42,y+190,90,30);apply.setBounds(140,y+190,80,30);clear.setBounds(230,y+190,75,30);
  status.setBounds(a.getRight()-320,y+190,300,30);
  // FIX (preset restructure): overlay now anchored under the preset list/kebab on the LEFT, where
