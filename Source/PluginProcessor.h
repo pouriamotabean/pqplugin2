@@ -2,9 +2,22 @@
 #include <JuceHeader.h>
 #include <array>
 #include <atomic>
+#include <vector>
+#include <memory>
+
+class PQAnalysisThread; // defined in PluginProcessor.cpp - see PQAudioProcessor::friend declaration below
 
 class PQAudioProcessor : public juce::AudioProcessor
 {
+    // FIX (B1 - FFT on the audio thread): analyzeAndUpdate()'s ~16k-point FFT used to run straight
+    // inside processBlock() every kHopSize samples - a real chunk of work dropped into the audio
+    // callback with nothing between it and an xrun on a loaded/slower machine. PQAnalysisThread (see
+    // .cpp) now owns that work on its own juce::Thread; processBlock() only ever does the cheap part
+    // (copying this block's raw mid/side samples into a lock-free FIFO and pinging the thread), never
+    // touches fftMid/fftSide/fftPos/hopCounter itself anymore, and never calls analyzeAndUpdate()
+    // directly. Friended so that thread can drive analyzeAndUpdate() and the fftMid/fftSide/fftPos/
+    // hopCounter state exactly as processBlock used to, just from a different thread.
+    friend class PQAnalysisThread;
 public:
     // FIX (low-frequency resolution): FFT bin spacing is sr/kFFTSize, so with the old 8192-point
     // FFT each bin covered ~5.4Hz - meaning the lowest octaves (20-80Hz) were built from only a
@@ -37,18 +50,20 @@ public:
         std::atomic<float> freq{1000.f};
         std::atomic<float> gainDb{0.f};
         std::atomic<float> q{0.7f};
-        // Low Cut / High Cut only: the actual roll-off steepness in dB/octave, one of
-        // {6,12,18,24,36,48} - see kCutSlopeSteps. Scroll-wheel on a cut node cycles through these
-        // (see PluginEditor::mouseWheelMove) instead of adjusting q, since q's "resonance bump"
-        // reading was never what people meant by "steeper slope" on a cut filter.
+        // Low Cut / High Cut only: the actual roll-off steepness in dB/octave - see kCutSlopeSteps.
+        // Scroll-wheel on a cut node cycles through these (see PluginEditor::mouseWheelMove) instead
+        // of adjusting q, since q's "resonance bump" reading was never what people meant by "steeper
+        // slope" on a cut filter.
         std::atomic<int> slopeOrder{12};
     };
-    // The six standard slope steps a Low/High Cut node cycles through via mouse-wheel.
-    static constexpr std::array<int,6> kCutSlopeSteps{6,12,18,24,36,48};
+    // The slope steps a Low/High Cut node cycles through via mouse-wheel, up to 96dB/oct - steep
+    // enough to read as a near-vertical wall for any practical audio purpose (each doubling past
+    // 48 buys diminishing audible return but costs another cascaded stage of CPU/phase).
+    static constexpr std::array<int,8> kCutSlopeSteps{6,12,18,24,36,48,72,96};
     // A cut's slope is built from a cascade of up to this many simple stages (1-pole = 6dB/oct,
-    // RBJ 2-pole = 12dB/oct) chained together - see rebuildManualCoefficients(). 48dB/oct needs 4
+    // RBJ 2-pole = 12dB/oct) chained together - see rebuildManualCoefficients(). 96dB/oct needs 8
     // two-pole stages, which is the largest case.
-    static constexpr int kMaxCutStages = 4;
+    static constexpr int kMaxCutStages = 8;
     std::array<ManualBand,kMaxManualBands> manualBands{};
     std::atomic<bool> manualDirty{true};
     // Editor calls these instead of touching manualBands directly, so the processor can flag
@@ -68,7 +83,7 @@ public:
     // which is what would otherwise cause a click/pop.
     void setManualBandTarget(int index,ManualTarget target);
 
-    PQAudioProcessor(); ~PQAudioProcessor() override = default;
+    PQAudioProcessor(); ~PQAudioProcessor() override;
     void prepareToPlay(double,int) override; void releaseResources() override {}
     bool isBusesLayoutSupported(const BusesLayout&) const override;
     void processBlock(juce::AudioBuffer<float>&,juce::MidiBuffer&) override;
@@ -115,15 +130,30 @@ public:
     // is only for the meter bar's average-level fill.
     std::atomic<float> inputPeakDb{-90}, outputPeakDb{-90};
     std::atomic<uint64_t> generation{0};
+    // FIX (B2): true whenever something has changed since the last successful save or load - set
+    // from every manual-EQ mutator above, matchGain(), captureReference()/clearReference(), and (from
+    // the editor) every slider/combo bound directly to a processor atomic that isn't behind one of
+    // those setters. Cleared back to false inside saveReference() and applyStateBlock() (so both a
+    // manual Load and a host session restore count as a fresh "clean" baseline). PresetPanel checks
+    // this before an implicit load (list.onChange) to warn about unsaved changes.
+    std::atomic<bool> presetDirty{false};
 
 private:
-    double sr=44100; juce::dsp::FFT fft{kFFTOrder}; juce::dsp::WindowingFunction<float> window{kFFTSize,juce::dsp::WindowingFunction<float>::hann};
+    // FIX (thread safety, part of B1): was a plain double, read from processBlock() (audio thread)
+    // while only ever written from prepareToPlay() (message/setup thread) - already a data race
+    // before the background analysis thread existed. Now also read by that new thread. Atomic makes
+    // every read/write well-defined without a lock (single float-sized value, no torn reads).
+    std::atomic<double> sr{44100.0}; juce::dsp::FFT fft{kFFTOrder}; juce::dsp::WindowingFunction<float> window{kFFTSize,juce::dsp::WindowingFunction<float>::hann};
     // FIX (analyzer latency): these are now circular history buffers instead of "fill once then
     // reset to zero" blocks, so analyzeAndUpdate() can run every kHopSize samples using the last
     // kFFTSize samples of history (75% overlap) instead of waiting a full kFFTSize samples between
     // updates. fftPos is the write cursor (wraps continuously); hopCounter times the analysis calls.
     std::array<float,kFFTSize> fftMid{},fftSide{}; int fftPos=0; int hopCounter=0;
-    std::array<float,kBins> liveStereo{},liveMid{},liveSide{}; std::array<float,kBands> corrStereo{},corrMid{},corrSide{};
+    std::array<float,kBins> liveStereo{},liveMid{},liveSide{};
+    // FIX (B1): these move from a plain float array to atomic - they're built by buildCorrection()
+    // which now runs on the background analysis thread, but read by rebuildCoefficients() on the
+    // audio thread whenever `dirty` is set. Same reasoning as refStereo/refMid/refSide above.
+    std::array<std::atomic<float>,kBands> corrStereo{},corrMid{},corrSide{};
     std::array<Coeff,kBands> stereoCoeff{},midCoeff{},sideCoeff{};
     struct State{float z1=0,z2=0;}; std::array<State,kBands> stStereoL{},stStereoR{},stMid{},stSide{};
     // FIX (widener too subtle): the delay line used to be a fixed 64-sample array, which is under
@@ -145,14 +175,29 @@ private:
     void rebuildManualCoefficients();
     static Coeff makeManualCoeff(ManualType,float freqHz,float gainDb,float q,double sampleRate);
     // Single first-order (6dB/oct) high-pass/low-pass stage, used as a building block for the odd
-    // (6, 18, 36... only 18 in our step list) slope steps that a whole number of 2-pole (12dB/oct)
-    // stages can't hit exactly on their own.
+    // slope steps (currently just 18) that a whole number of 2-pole (12dB/oct) stages can't hit
+    // exactly on their own.
     static Coeff make1PoleCut(bool highpass,float hz,double sampleRate);
 
     static float logFreq(float); static float interp(const std::array<float,kBins>&,float);
     static float interpAtomic(const std::array<std::atomic<float>,kBins>&,float);
-    void analyzeAndUpdate(); void buildCorrection(std::array<float,kBands>&,const std::array<std::atomic<float>,kBins>&,const std::array<float,kBins>&,float);
+    void analyzeAndUpdate(); void buildCorrection(std::array<std::atomic<float>,kBands>&,const std::array<std::atomic<float>,kBins>&,const std::array<float,kBins>&,float);
     void rebuildCoefficients(); static Coeff peak(float,float,float,float); static float process(const Coeff&,State&,float);
+
+    // FIX (B1): lock-free single-producer/single-consumer handoff from the audio thread to
+    // PQAnalysisThread. processBlock() writes this block's raw mid/side samples into fifoMid/
+    // fifoSide (sized generously - a fraction of a second - so the analysis thread falling briefly
+    // behind under load just delays the on-screen curve slightly, it never blocks or drops audio);
+    // the thread drains them at its own pace. If the FIFO is ever completely full (analysis thread
+    // starved), prepareToWrite silently reports less room than requested and the newest samples for
+    // that block are skipped - a fine tradeoff for a visual/match analyzer, never touches the audio
+    // path itself.
+    juce::AbstractFifo analysisFifo{1<<16};
+    std::vector<float> fifoMid, fifoSide;
+    // Per-block scratch, written only by the audio thread while it still holds each sample locally
+    // (right where fftMid/fftSide used to be written directly) - sized once in prepareToPlay().
+    std::vector<float> blockMid, blockSide;
+    std::unique_ptr<PQAnalysisThread> analysisThread;
     // Shared by setStateInformation() (host session restore) AND saveReference/loadReference (the
     // on-disk .pqref "preset" file - see item 6): a preset is now just the full plugin state, so
     // both paths funnel through the exact same parser/writer. Understands two on-disk formats:
