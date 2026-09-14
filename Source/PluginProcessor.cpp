@@ -103,6 +103,7 @@ void PQAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
     const float inGain=juce::Decibels::decibelsToGain(inputTrimDb.load());
     const float outGain=juce::Decibels::decibelsToGain(outputTrimDb.load());
     const double srv=sr.load();
+    const bool byp=bypassed.load();
     float inPeakLin=0.f, outPeakLin=0.f;
     // FIX (B1): defensive resize - a host block bigger than the samplesPerBlock prepareToPlay() sized
     // blockMid/blockSide for (rare, but not forbidden by the API) would otherwise overrun them below.
@@ -110,6 +111,22 @@ void PQAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
     for(int i=0;i<n;++i){
         float L=b.getSample(0,i)*inGain, R=(trueMono?L:b.getSample(1,i)*inGain); inSum += .5f*(L*L+R*R);
         inPeakLin = juce::jmax(inPeakLin, std::abs(L), std::abs(R));
+
+        // FIX (item 4): coefficients must stay current regardless of bypass/solo state, so a plain
+        // toggle back to un-bypassed never plays a stale correction for one buffer.
+        if(dirty.exchange(false)) rebuildCoefficients();
+
+        // BYPASS: skip correction/manual-EQ/width entirely - output is just the (trim-adjusted) raw
+        // input. The analyzer still gets fed below so the match curve keeps updating while you listen
+        // dry, and the input/output meters keep reading normally either way.
+        if(byp){
+            float m=.5f*(L+R), s=.5f*(L-R);
+            blockMid[(size_t)i]=m; blockSide[(size_t)i]=s;
+            L*=outGain; R*=outGain;
+            b.setSample(0,i,L); if(ch>1)b.setSample(1,i,R); outSum += .5f*(L*L+R*R);
+            outPeakLin = juce::jmax(outPeakLin, std::abs(L), std::abs(R));
+            continue;
+        }
 
         // FIX (widener strength): delay times are now musically meaningful (ms, scaled to sample
         // rate) instead of a fixed ~1.3ms 64-sample buffer, so each mode is actually audible.
@@ -142,10 +159,6 @@ void PQAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
         // loop) instead of written straight into the FFT history inline on the audio thread.
         blockMid[(size_t)i]=m; blockSide[(size_t)i]=s;
 
-        // FIX (item 4): coefficients must stay current regardless of which legs are on/off (e.g.
-        // Mid muted but Side/Stereo still need up-to-date correction), so this now runs unconditionally
-        // instead of only inside the old "no solo" branch.
-        if(dirty.exchange(false)) rebuildCoefficients();
         // Mid: correction + any manual bands targeting Mid always run now (see FIX note above).
         for(int k=0;k<kBands;++k) m=process(midCoeff[k],stMid[k],m);
         for(int mbI=0;mbI<kMaxManualBands;++mbI){
