@@ -78,14 +78,14 @@ public:
     // Whether the mono-widener runs before the EQ correction (so the analyzer/match "sees" the
     // widened signal) or after it (so widening is the last thing applied to the final output).
     std::atomic<bool> widthPostEq{false};
-    // FIX (item 4): the old Solo was a single mutually-exclusive choice (None/Stereo/Mid/Side), so
-    // you could only ever hear/see one band in isolation - "Mid + Side together" or "all three" were
-    // impossible. These are now three independent on/off flags: any combination can be shown on the
-    // analyzer and heard in the output. Mid/Side default "on" = normal corrected content; switched
-    // "off" that leg's raw+corrected contribution is muted out of the mix entirely, so it can be
-    // isolated. Stereo has no raw content of its own (it's the final stage applied to the already-
-    // recombined L/R) - "on" runs that final EQ/width stage as usual, "off" bypasses it.
-    std::atomic<bool> stereoOn{true}, midOn{true}, sideOn{true};
+    // FIX (bug #1/#2 - "solo stereo has input but no output" / analyzer lines behaving oddly):
+    // these three used to ALSO gate the audio itself (muting Mid/Side to isolate a band), which is
+    // exactly what broke Stereo: it has no signal of its own, it only corrects the already-recombined
+    // L/R - so muting Mid+Side to "solo" Stereo left it correcting silence. These are now PURELY a
+    // display concern: which of the three curves (live analyzer + captured reference) is drawn on
+    // the chart. The audio path no longer reads these at all - see processBlock(). Default OFF so
+    // the analyzer opens clean; each one is switched on independently as its curve is wanted.
+    std::atomic<bool> stereoOn{false}, midOn{false}, sideOn{false};
     std::atomic<bool> hasReference{false};
     std::array<std::atomic<float>,kBins> stereoCurve{},midCurve{},sideCurve{};
     // FIX (crash-risk #2): reference arrays are now atomic (were plain float[] before) because the
