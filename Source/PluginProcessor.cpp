@@ -437,8 +437,14 @@ void PQAudioProcessor::applyMatch(){if(!hasReference.load())return;buildCorrecti
 // against the input isn't biased by a peak change the frequency correction introduced. Since
 // outputTrimDb is a plain linear gain in dB, and outputPeakDb was measured *with* the current trim
 // already applied, the correction is just the remaining gap between the two peak-hold values.
+// I3: "MATCH GAIN" reads either the peak-hold pair or the RMS pair depending on gainMatchMode - see
+// the header comment on GainMatchMode for when you'd want each. Same underlying math either way:
+// outputTrimDb is a plain linear gain in dB, and the chosen "output" reading was measured *with* the
+// current trim already applied, so the correction is just the remaining gap between the two readings.
 void PQAudioProcessor::matchGain(){
-    float diff=inputPeakDb.load()-outputPeakDb.load();
+    float diff = (gainMatchMode.load()==GainMatchMode::Peak)
+        ? (inputPeakDb.load()-outputPeakDb.load())
+        : (inputRmsDb.load()-outputRmsDb.load());
     outputTrimDb.store(juce::jlimit(-24.f,24.f,outputTrimDb.load()+diff));
     presetDirty.store(true);
 }
@@ -458,13 +464,39 @@ bool PQAudioProcessor::loadReference(const juce::File& f){
     return applyStateBlock(mb.getData(),(int)mb.getSize());
 }
 
+// I2: the reference curve on its own - none of the manual EQ/width/match-amount/trim state a full
+// preset carries. Own magic number and extension (.pqmatch) so this can never be mistaken for, or
+// accidentally loaded as, a full .pqref preset (loadReference()/applyStateBlock() will correctly
+// reject a .pqmatch file since its magic doesn't match any known preset version, and vice versa).
+namespace { constexpr int kMatchOnlyMagic = 0x50515246; }
+bool PQAudioProcessor::exportReferenceOnly(const juce::File& f){
+    if(!hasReference.load()) return false;
+    juce::MemoryBlock d; juce::MemoryOutputStream o(d,true);
+    o.writeInt(kMatchOnlyMagic);
+    o.writeInt(kBins);
+    for(auto* a:{&refStereo,&refMid,&refSide}) for(int i=0;i<kBins;++i) o.writeFloat((*a)[(size_t)i].load());
+    o.writeFloat(lowHz.load()); o.writeFloat(highHz.load());
+    return f.replaceWithData(d.getData(),d.getSize());
+}
+bool PQAudioProcessor::importReferenceOnly(const juce::File& f){
+    juce::MemoryBlock d; if(!f.loadFileAsData(d)) return false;
+    juce::MemoryInputStream in(d.getData(),d.getSize(),false);
+    if(in.readInt()!=kMatchOnlyMagic) return false;
+    if(in.readInt()!=kBins) return false;
+    for(auto* a:{&refStereo,&refMid,&refSide}) for(int i=0;i<kBins;++i) (*a)[(size_t)i].store(in.readFloat());
+    lowHz.store(in.readFloat()); highHz.store(in.readFloat());
+    hasReference.store(true); applyMatch(); presetDirty.store(true);
+    return true;
+}
+
 void PQAudioProcessor::getStateInformation(juce::MemoryBlock& d){
     juce::MemoryOutputStream o(d,true);
-    o.writeInt(0x50515339); // FIX: version bumped (was 0x50515338) to add per-Cut-band slope order
+    o.writeInt(0x5051533a); // FIX: version bumped (was 0x50515339) to add gainMatchMode (I3)
     for(float v:{stereoMatch.load(),midMatch.load(),sideMatch.load(),lowHz.load(),highHz.load(),maxCorrectionDb.load(),smoothingOctaves.load(),widthAmount.load(),widthDepth.load()})o.writeFloat(v);
     o.writeInt((int)widthMode.load());
     o.writeBool(widthPostEq.load());
     o.writeFloat(inputTrimDb.load()); o.writeFloat(outputTrimDb.load());
+    o.writeInt((int)gainMatchMode.load());
     o.writeBool(hasReference.load());
     if(hasReference.load()) for(auto* a:{&refStereo,&refMid,&refSide}) for(int i=0;i<kBins;++i) o.writeFloat((*a)[(size_t)i].load());
     o.writeInt(kMaxManualBands);
@@ -484,12 +516,13 @@ bool PQAudioProcessor::applyStateBlock(const void* data,int size){
         lowHz.store(in.readFloat());highHz.store(in.readFloat());maxCorrectionDb.store(in.readFloat());smoothingOctaves.store(in.readFloat());
         hasReference.store(true); applyMatch(); presetDirty.store(false); return true;
     }
-    if(magic!=0x50515339 && magic!=0x50515338 && magic!=0x50515337 && magic!=0x50515336 && magic!=0x50515335 && magic!=0x50515334 && magic!=0x50515333 && magic!=0x50515332) return false; // unknown/corrupt state: ignore rather than risk misreading garbage into the DSP
-    bool hasSlopeOrder = (magic==0x50515339);
-    bool hasManualTarget = (magic==0x50515339 || magic==0x50515338);
-    bool hasTrim = (magic==0x50515339 || magic==0x50515338 || magic==0x50515337);
-    bool hasManualEq = (magic==0x50515339 || magic==0x50515338 || magic==0x50515337 || magic==0x50515336);
-    bool hasWidthStage = (magic==0x50515339 || magic==0x50515338 || magic==0x50515337 || magic==0x50515336 || magic==0x50515335);
+    if(magic!=0x5051533a && magic!=0x50515339 && magic!=0x50515338 && magic!=0x50515337 && magic!=0x50515336 && magic!=0x50515335 && magic!=0x50515334 && magic!=0x50515333 && magic!=0x50515332) return false; // unknown/corrupt state: ignore rather than risk misreading garbage into the DSP
+    bool hasGainMatchMode = (magic==0x5051533a);
+    bool hasSlopeOrder = (magic==0x5051533a || magic==0x50515339);
+    bool hasManualTarget = (magic==0x5051533a || magic==0x50515339 || magic==0x50515338);
+    bool hasTrim = (magic==0x5051533a || magic==0x50515339 || magic==0x50515338 || magic==0x50515337);
+    bool hasManualEq = (magic==0x5051533a || magic==0x50515339 || magic==0x50515338 || magic==0x50515337 || magic==0x50515336);
+    bool hasWidthStage = (magic==0x5051533a || magic==0x50515339 || magic==0x50515338 || magic==0x50515337 || magic==0x50515336 || magic==0x50515335);
     bool hadOldEnableFlags = (magic==0x50515333); // v3 wrote 3 bools we no longer use; skip them so the rest of the stream stays aligned
     stereoMatch.store(in.readFloat());midMatch.store(in.readFloat());sideMatch.store(in.readFloat());
     lowHz.store(in.readFloat());highHz.store(in.readFloat());maxCorrectionDb.store(in.readFloat());smoothingOctaves.store(in.readFloat());
@@ -498,6 +531,7 @@ bool PQAudioProcessor::applyStateBlock(const void* data,int size){
     if(hasWidthStage) widthPostEq.store(in.readBool()); else widthPostEq.store(false);
     if(hadOldEnableFlags){ in.readBool(); in.readBool(); in.readBool(); }
     if(hasTrim){ inputTrimDb.store(in.readFloat()); outputTrimDb.store(in.readFloat()); } else { inputTrimDb.store(0.f); outputTrimDb.store(0.f); }
+    gainMatchMode.store(hasGainMatchMode ? (GainMatchMode)in.readInt() : GainMatchMode::Peak);
     bool hr=in.readBool();
     if(hr) for(auto* a:{&refStereo,&refMid,&refSide}) for(int i=0;i<kBins;++i) (*a)[(size_t)i].store(in.readFloat());
     hasReference.store(hr);
