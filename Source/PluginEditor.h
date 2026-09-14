@@ -32,15 +32,59 @@ private:
     juce::Colour colour{juce::Colours::white};
 };
 
-// ---- Preset panel (item 6) -------------------------------------------------------------------
-// Replaces the old bottom-row SAVE/LOAD buttons with a small top-of-window browser, opened/closed
-// from a single PRESETS button. A "preset" is the plugin's full state (reference + manual EQ +
-// width + match + trim) - see PQAudioProcessor::saveReference/loadReference/applyStateBlock -
-// stored as ordinary .pqref files in a fixed folder so they show up in one list instead of
-// scattered wherever a save dialog happened to be pointed.
+// Replaces the plain STEREO/MID/SIDE TextButtons with a rounded pill + coloured dot + label, matching
+// the reference look. Toggle state is driven externally (from PQAudioProcessor::stereoOn/midOn/sideOn
+// via refreshBandButtons()) rather than JUCE's own click-toggle, since the source of truth already
+// lives on the processor - this is purely how that existing on/off state is drawn.
+class DotTabButton : public juce::Button {
+public:
+    explicit DotTabButton(const juce::String& label):juce::Button(label){}
+    void setDotColour(juce::Colour c){ colour=c; repaint(); }
+    void paintButton(juce::Graphics& g, bool isMouseOver, bool) override {
+        auto r=getLocalBounds().toFloat();
+        bool on=getToggleState();
+        g.setColour(juce::Colour(0xff101419)); g.fillRoundedRectangle(r,r.getHeight()*0.5f);
+        g.setColour(on?colour.withAlpha(0.85f):juce::Colour(0xff242a31));
+        g.drawRoundedRectangle(r.reduced(0.75f),r.getHeight()*0.5f,1.2f);
+        float dotR=4.f, dotX=r.getX()+16.f, dotY=r.getCentreY();
+        g.setColour(on?colour:colour.withAlpha(isMouseOver?0.6f:0.35f));
+        g.fillEllipse(dotX-dotR,dotY-dotR,dotR*2.f,dotR*2.f);
+        g.setColour(on?juce::Colours::white:juce::Colour(0xff737e89));
+        g.setFont(juce::FontOptions(13).withStyle("bold"));
+        float textX=dotX+dotR+10.f;
+        g.drawText(getButtonText(), textX, 0.f, r.getRight()-textX-8.f, r.getHeight(), juce::Justification::centredLeft);
+    }
+private:
+    juce::Colour colour{juce::Colours::white};
+};
+
+// Small square "manage presets" icon button (a vertical kebab/more-options glyph) - replaces the old
+// wide PRESETS text button now that the preset list itself is always visible in the header (see
+// PQAudioProcessorEditor::presetList); this just opens/closes the Save/Delete overlay (PresetPanel).
+class KebabButton : public juce::Button {
+public:
+    KebabButton():juce::Button({}){}
+    void paintButton(juce::Graphics& g, bool isMouseOver, bool) override {
+        auto r=getLocalBounds().toFloat();
+        g.setColour(juce::Colour(0xff101419)); g.fillRoundedRectangle(r,8.f);
+        g.setColour(juce::Colour(0xff242a31)); g.drawRoundedRectangle(r.reduced(0.75f),8.f,1.f);
+        g.setColour(isMouseOver?juce::Colour(0xfff2f4f7):juce::Colour(0xff737e89));
+        float cx=r.getCentreX(), cy=r.getCentreY(), spacing=6.f, rad=1.7f;
+        for(int i=-1;i<=1;++i) g.fillEllipse(cx-rad,cy+(float)i*spacing-rad,rad*2.f,rad*2.f);
+    }
+};
+
+// ---- Preset panel (item 6, restructured) ------------------------------------------------------
+// The preset list itself is now always visible in the main header (PQAudioProcessorEditor::
+// presetList) rather than hidden inside this panel - picking a preset is a one-click affair, same
+// as any normal dropdown. This panel is now just the "manage" popover (opened from the small kebab
+// icon next to the list): naming and saving a new preset, or deleting the currently-selected one.
+// A "preset" is still the plugin's full state (reference + manual EQ + width + match + trim) - see
+// PQAudioProcessor::saveReference/loadReference/applyStateBlock - stored as ordinary .pqref files in
+// a fixed folder so they show up in one list instead of scattered wherever a save dialog pointed.
 class PresetPanel : public juce::Component {
 public:
-    explicit PresetPanel(PQAudioProcessor& proc);
+    PresetPanel(PQAudioProcessor& proc, juce::ComboBox& listRef);
     void resized() override;
     void paint(juce::Graphics&) override;
     void refreshList();
@@ -49,8 +93,8 @@ public:
     std::function<void()> onPresetLoaded;
 private:
     PQAudioProcessor& p;
-    juce::Label title{"", "PRESETS"};
-    juce::ComboBox list;
+    juce::ComboBox& list; // lives in the main editor header now, not in this panel - see above
+    juce::Label title{"", "MANAGE PRESETS"};
     juce::TextEditor nameBox;
     juce::TextButton saveBtn{"SAVE"}, deleteBtn{"DELETE"}, closeBtn{"X"};
     static juce::File presetDir();
@@ -67,13 +111,17 @@ public: explicit PQAudioProcessorEditor(PQAudioProcessor&); ~PQAudioProcessorEdi
  // not just via the right-click "Delete Band" menu item.
  bool keyPressed(const juce::KeyPress&) override;
 private:
- PQAudioProcessor& p; juce::TextButton stereo{"STEREO"},mid{"MID"},side{"SIDE"},capture{"CAPTURE"},apply{"APPLY"},clear{"CLEAR"},widthStage{"PRE"},matchGainBtn{"MATCH GAIN"},presetsBtn{"PRESETS"},bypass{"BYPASS"};
+ PQAudioProcessor& p; DotTabButton stereo{"STEREO"},mid{"MID"},side{"SIDE"}; juce::TextButton capture{"CAPTURE"},apply{"APPLY"},clear{"CLEAR"},widthStage{"PRE"},matchGainBtn{"MATCH GAIN"},bypass{"BYPASS"}; KebabButton presetsBtn;
  juce::Slider sAmt,mAmt,siAmt,low,high,width,depth;
  // Max dB / Smoothing are no longer exposed as sliders (kept fixed at sane defaults in the
  // processor); this screen space now holds the input/output level meters + trim faders instead.
  juce::Slider inputTrim,outputTrim; juce::Rectangle<float> inputMeterArea,outputMeterArea;
  juce::ComboBox mode; juce::Label status;
- // FIX (item 6): SAVE/LOAD moved into presetPanel (a small overlay opened by presetsBtn), so the
+ // FIX (preset restructure): the list is now a permanent, always-visible header control (like any
+ // normal "Default v" dropdown) - declared before presetPanel because its constructor takes a
+ // reference to this and member initialisation follows declaration order, not initialiser-list order.
+ juce::ComboBox presetList;
+ // FIX (item 6): SAVE/LOAD moved into presetPanel (a small overlay opened by the kebab icon), so the
  // bottom row no longer needs its own FileChooser for reference files. syncControlsFromProcessor()
  // re-reads every editor control from the processor after a preset (which can change far more than
  // just the reference curve) loads.
