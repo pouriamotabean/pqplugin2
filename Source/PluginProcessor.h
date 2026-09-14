@@ -115,6 +115,13 @@ public:
     // the chart. The audio path no longer reads these at all - see processBlock(). Default OFF so
     // the analyzer opens clean; each one is switched on independently as its curve is wanted.
     std::atomic<bool> stereoOn{false}, midOn{false}, sideOn{false};
+    // True bypass: skips Mid/Side/Stereo correction, manual EQ, and Width entirely (see
+    // processBlock()) so the output is the raw (trim-adjusted) input - the quick A/B every engineer
+    // reaches for first. Deliberately NOT persisted in getStateInformation()/loadReference() - same
+    // treatment as stereoOn/midOn/sideOn above, since it's a transient monitoring toggle, not a
+    // tonal setting worth saving into a preset. The analyzer and input/output meters keep running
+    // normally while bypassed, so you can still watch the match curve while listening dry.
+    std::atomic<bool> bypassed{false};
     std::atomic<bool> hasReference{false};
     std::array<std::atomic<float>,kBins> stereoCurve{},midCurve{},sideCurve{};
     // FIX (crash-risk #2): reference arrays are now atomic (were plain float[] before) because the
