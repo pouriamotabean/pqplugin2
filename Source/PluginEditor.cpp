@@ -76,6 +76,31 @@ PresetPanel::PresetPanel(PQAudioProcessor& proc, juce::ComboBox& listRef):p(proc
         });
     };
     closeBtn.onClick=[this]{ setVisible(false); };
+    addAndMakeVisible(exportMatchBtn); addAndMakeVisible(importMatchBtn);
+    for(auto*b:{&exportMatchBtn,&importMatchBtn}){ b->setColour(juce::TextButton::buttonColourId,panel()); b->setColour(juce::TextButton::textColourOffId,white()); b->setColour(juce::TextButton::textColourOnId,white()); }
+    exportMatchBtn.setTooltip("Save just the captured reference curve (not the rest of this preset) to share or reuse elsewhere.");
+    importMatchBtn.setTooltip("Load a reference curve exported from here (or another session) without touching your current EQ/width/trim settings.");
+    // I2: exports/imports ONLY the reference curve (see PQAudioProcessor::exportReferenceOnly/
+    // importReferenceOnly) - deliberately an unrestricted FileChooser, not presetDir(), since the
+    // point is moving this between projects/people, not adding it to the local preset list.
+    exportMatchBtn.onClick=[this]{
+        if(!p.hasReference.load()) return; // nothing captured yet - silently no-op rather than exporting an empty/meaningless curve
+        activeChooser=std::make_unique<juce::FileChooser>("Export reference curve...", juce::File(), "*.pqmatch");
+        activeChooser->launchAsync(juce::FileBrowserComponent::saveMode|juce::FileBrowserComponent::warnAboutOverwriting,
+            [this](const juce::FileChooser& fc){
+                auto f=fc.getResult(); if(f==juce::File()) return;
+                if(!f.hasFileExtension(".pqmatch")) f=f.withFileExtension(".pqmatch");
+                p.exportReferenceOnly(f);
+            });
+    };
+    importMatchBtn.onClick=[this]{
+        activeChooser=std::make_unique<juce::FileChooser>("Import reference curve...", juce::File(), "*.pqmatch");
+        activeChooser->launchAsync(juce::FileBrowserComponent::openMode,
+            [this](const juce::FileChooser& fc){
+                auto f=fc.getResult(); if(f==juce::File()) return;
+                if(p.importReferenceOnly(f) && onPresetLoaded) onPresetLoaded();
+            });
+    };
     refreshList();
 }
 void PresetPanel::refreshList(){
@@ -103,6 +128,11 @@ void PresetPanel::resized(){
     saveBtn.setBounds(row.removeFromLeft(row.getWidth()/2-4));
     row.removeFromLeft(8);
     deleteBtn.setBounds(row);
+    a.removeFromTop(10);
+    auto matchRow=a.removeFromTop(28);
+    exportMatchBtn.setBounds(matchRow.removeFromLeft(matchRow.getWidth()/2-4));
+    matchRow.removeFromLeft(8);
+    importMatchBtn.setBounds(matchRow);
 }
 
 PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcessorEditor(&x),p(x),presetPanel(x,presetList){setResizable(true,true);setSize(1320,760);
@@ -110,7 +140,11 @@ PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcesso
  for(auto*t:{&stereo,&mid,&side}) addAndMakeVisible(*t);
  stereo.setDotColour(white()); mid.setDotColour(yellow()); side.setDotColour(blue());
  for(auto*q:{&capture,&apply,&clear})setupButton(*q,white());
+ capture.setTooltip("Capture the current live spectrum as the reference target to match against.");
+ apply.setTooltip("Recompute the correction curve for the currently checked target(s) from the captured reference.");
+ clear.setTooltip("Discard the captured reference and remove all automatic correction.");
  setupButton(widthStage,white()); widthStage.setButtonText(p.widthPostEq.load()?"POST":"PRE");
+ widthStage.setTooltip("PRE: widening happens before EQ correction (the analyzer/match hears the widened signal). POST: widening is the last step, after correction.");
  // Toggles whether the mono-widener runs before the EQ correction (PRE, so the analyzer/match
  // "hears" the widened signal) or after it (POST, widening is the very last step on the output).
  widthStage.onClick=[this]{ bool now=!p.widthPostEq.load(); p.widthPostEq.store(now); widthStage.setButtonText(now?"POST":"PRE"); p.presetDirty.store(true); };
@@ -121,6 +155,9 @@ PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcesso
  stereo.onClick=[this]{p.stereoOn.store(!p.stereoOn.load()); refreshBandButtons();};
  mid.onClick=[this]{p.midOn.store(!p.midOn.load()); refreshBandButtons();};
  side.onClick=[this]{p.sideOn.store(!p.sideOn.load()); refreshBandButtons();};
+ stereo.setTooltip("Show/hide the Stereo (combined L+R) curve on the analyzer.");
+ mid.setTooltip("Show/hide the Mid (mono-summed) curve on the analyzer.");
+ side.setTooltip("Show/hide the Side (stereo difference) curve on the analyzer.");
  refreshBandButtons();
 
  // FIX: one show/hide dot per manual-EQ target, tinted to match that target's node/curve colour so
@@ -136,9 +173,19 @@ PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcesso
  stereoEqToggle.setDotColour(manualStereoColour());
  midEqToggle.setDotColour(manualMidColour());
  sideEqToggle.setDotColour(manualSideColour());
+ stereoEqToggle.setTooltip("Show manual EQ bands on Stereo, and make Stereo the target for new bands you add.");
+ midEqToggle.setTooltip("Show manual EQ bands on Mid, and make Mid the target for new bands you add.");
+ sideEqToggle.setTooltip("Show manual EQ bands on Side, and make Side the target for new bands you add.");
 
  auto bind=[this](juce::Slider&s,std::atomic<float>&v){setupSlider(s,0,100,.1);s.setValue(v.load()*100);s.onValueChange=[this,&s,&v]{v.store((float)s.getValue()/100.f);p.applyMatch();p.presetDirty.store(true);};};bind(sAmt,p.stereoMatch);bind(mAmt,p.midMatch);bind(siAmt,p.sideMatch);
+ sAmt.setTooltip("How strongly the captured reference corrects the Stereo signal, 0-100%.");
+ mAmt.setTooltip("How strongly the captured reference corrects the Mid signal, 0-100%.");
+ siAmt.setTooltip("How strongly the captured reference corrects the Side signal, 0-100%.");
  setupSlider(low,20,20000,1);setupSlider(high,20,20000,1);setupSlider(width,0,100,.1);setupSlider(depth,0,200,1);
+ low.setTooltip("Correction is only applied above this frequency.");
+ high.setTooltip("Correction is only applied below this frequency.");
+ width.setTooltip("How much of the mono-widener effect to blend in, 0-100%.");
+ depth.setTooltip("Scales the widener's delay/depth character - higher pushes the effect further.");
  // FIX: the frequency chart is drawn on a log scale (20Hz-20kHz), but these sliders were linear -
  // that mismatch is exactly why dragging near 20Hz raced across the whole chart while dragging near
  // 20kHz barely moved the line. A log-style skew around the geometric middle of the range
@@ -153,11 +200,24 @@ PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcesso
  setupVerticalTrim(inputTrim); setupVerticalTrim(outputTrim);
  inputTrim.setRange(-24,24,.1); outputTrim.setRange(-24,24,.1);
  inputTrim.setValue(p.inputTrimDb.load()); outputTrim.setValue(p.outputTrimDb.load());
+ inputTrim.setTooltip("Input trim, +/-24dB, applied before any processing.");
+ outputTrim.setTooltip("Output trim, +/-24dB, applied after everything else - this is what MATCH GAIN adjusts.");
  inputTrim.onValueChange=[this]{p.inputTrimDb.store((float)inputTrim.getValue());p.presetDirty.store(true);};
  outputTrim.onValueChange=[this]{p.outputTrimDb.store((float)outputTrim.getValue());p.presetDirty.store(true);};
  setupButton(matchGainBtn,white());
- matchGainBtn.onClick=[this]{ p.matchGain(); outputTrim.setValue(p.outputTrimDb.load(),juce::dontSendNotification); status.setText("GAIN MATCHED",juce::dontSendNotification); };
+ auto refreshMatchGainLabel=[this]{ matchGainBtn.setButtonText(p.gainMatchMode.load()==PQAudioProcessor::GainMatchMode::Peak?"MATCH PEAK":"MATCH RMS"); };
+ refreshMatchGainLabel();
+ matchGainBtn.setTooltip("Left-click: nudge output trim so it matches the input. Right-click: switch between matching Peak or RMS level.");
+ matchGainBtn.onClick=[this]{ p.matchGain(); outputTrim.setValue(p.outputTrimDb.load(),juce::dontSendNotification); status.setText(p.gainMatchMode.load()==PQAudioProcessor::GainMatchMode::Peak?"PEAK MATCHED":"RMS MATCHED",juce::dontSendNotification); };
+ matchGainBtn.onRightClick=[this,refreshMatchGainLabel]{
+     bool nowPeak = p.gainMatchMode.load()==PQAudioProcessor::GainMatchMode::Peak;
+     p.gainMatchMode.store(nowPeak?PQAudioProcessor::GainMatchMode::Rms:PQAudioProcessor::GainMatchMode::Peak);
+     p.presetDirty.store(true);
+     refreshMatchGainLabel();
+     status.setText(juce::String("MATCH MODE: ")+(nowPeak?"RMS":"PEAK"),juce::dontSendNotification);
+ };
  mode.addItem("MICRO SHIFT",1);mode.addItem("HAAS",2);mode.addItem("DECORRELATED",3);mode.setSelectedId((int)p.widthMode.load()+1);mode.onChange=[this]{p.widthMode=(PQAudioProcessor::WidthMode)(mode.getSelectedId()-1);p.presetDirty.store(true);};
+ mode.setTooltip("How mono content is turned into stereo width: Micro Shift (subtle), Haas (delay-based), or Decorrelated (dual-tap, widest).");
  capture.onClick=[this]{p.captureReference();status.setText("REFERENCE CAPTURED",juce::dontSendNotification);};apply.onClick=[this]{p.applyMatch();status.setText("MATCH UPDATED",juce::dontSendNotification);};clear.onClick=[this]{p.clearReference();status.setText("REFERENCE CLEARED",juce::dontSendNotification);};
 
  // FIX (preset restructure): the list itself now sits permanently in the header (styled like a
@@ -169,7 +229,9 @@ PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcesso
  presetList.setColour(juce::ComboBox::textColourId,white());
  presetList.setColour(juce::ComboBox::outlineColourId,grid());
  presetList.setColour(juce::ComboBox::arrowColourId,muted());
+ presetList.setTooltip("Load a saved preset.");
  addAndMakeVisible(presetsBtn);
+ presetsBtn.setTooltip("Save the current settings as a new preset, or delete/export the selected one.");
  presetsBtn.onClick=[this]{ presetPanel.setVisible(!presetPanel.isVisible()); if(presetPanel.isVisible()) presetPanel.toFront(true); };
  presetPanel.onPresetLoaded=[this]{ syncControlsFromProcessor(); status.setText("PRESET LOADED",juce::dontSendNotification); };
  addChildComponent(presetPanel); // starts hidden
@@ -177,6 +239,7 @@ PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcesso
  // Simple true-bypass toggle - deliberately not persisted (see PQAudioProcessor::bypassed), so it
  // always opens un-bypassed regardless of what preset/session is loaded.
  setupButton(bypass,white());
+ bypass.setTooltip("Bypass all correction/EQ/width - hear the raw (trim-adjusted) input for A/B comparison.");
  bypass.onClick=[this]{ p.bypassed.store(!p.bypassed.load()); refreshBypassButton(); };
  refreshBypassButton();
 
@@ -199,6 +262,7 @@ void PQAudioProcessorEditor::syncControlsFromProcessor(){
  widthStage.setButtonText(p.widthPostEq.load()?"POST":"PRE");
  inputTrim.setValue(p.inputTrimDb.load(),juce::dontSendNotification);
  outputTrim.setValue(p.outputTrimDb.load(),juce::dontSendNotification);
+ matchGainBtn.setButtonText(p.gainMatchMode.load()==PQAudioProcessor::GainMatchMode::Peak?"MATCH PEAK":"MATCH RMS");
  repaint();
 }
 
@@ -647,7 +711,7 @@ void PQAudioProcessorEditor::paint(juce::Graphics&g){
  }
  label(g,"MATCH AMOUNT",{42,chart.getBottom()+47,150,18},muted());label(g,"FREQUENCY RANGE",{700,chart.getBottom()+47,180,18},muted());
  int y=(int)chart.getBottom()+70;
- label(g,"STEREO",{45,(float)y+2,80,18},white()); label(g,"MID",{45,(float)y+34,80,18},yellow()); label(g,"SIDE",{45,(float)y+66,80,18},blue());
+ label(g,"STEREO",{45,(float)y+2,80,18},white()); label(g,"MID",{45,(float)y+44,80,18},yellow()); label(g,"SIDE",{45,(float)y+86,80,18},blue());
  label(g,"LOW HZ",{700,(float)y+2,100,18},muted()); label(g,"HIGH HZ",{900,(float)y+2,100,18},muted());
  // FIX (layout - your mockup): MODE/WIDTH/STAGE/DEPTH moved out of their old disconnected spot
  // (floating below MATCH AMOUNT, in a column with nothing above or below it) and into the same right
@@ -677,10 +741,10 @@ void PQAudioProcessorEditor::paint(juce::Graphics&g){
  g.setColour(white()); g.setFont(juce::FontOptions(10));
  g.drawText(juce::String(p.inputRmsDb.load(),1),inputMeterArea.withY(inputMeterArea.getBottom()+3).withHeight(14),juce::Justification::centred);
  g.drawText(juce::String(p.outputRmsDb.load(),1),outputMeterArea.withY(outputMeterArea.getBottom()+3).withHeight(14),juce::Justification::centred);
- // FIX (item 7): "GAIN MATCHED"/etc used to float in the corner with nothing to explain it. It's a
- // shared status line for CAPTURE/APPLY/CLEAR/SAVE/LOAD/MATCH GAIN feedback, so give it a caption
- // instead of removing the (still useful) shared line.
- label(g,"STATUS",{325.f,(float)y+190-16,100,14},muted());
+ // FIX ("STATUS" confusion): the separate caption label is gone - it just floated there even when
+ // idle with nothing next to it, which is exactly what was confusing. The status Label itself
+ // (below, in resized()) is self-explanatory whenever it actually has something to say (e.g. "PEAK
+ // MATCHED"), and renders as nothing at all when empty.
 }
 void PQAudioProcessorEditor::resized(){auto a=getLocalBounds();
  // FIX (preset restructure): the preset dropdown + kebab now live on the LEFT of the header, right
@@ -710,7 +774,7 @@ void PQAudioProcessorEditor::resized(){auto a=getLocalBounds();
  chartFull.removeFromRight(16.f);
  auto chart=chartFull;
  int y=chart.getBottom()+70;
- sAmt.setBounds(145,y,470,22);mAmt.setBounds(145,y+32,470,22);siAmt.setBounds(145,y+64,470,22);low.setBounds(700,y+18,185,22);high.setBounds(900,y+18,185,22);
+ sAmt.setBounds(145,y,470,22);mAmt.setBounds(145,y+42,470,22);siAmt.setBounds(145,y+84,470,22);low.setBounds(700,y+18,185,22);high.setBounds(900,y+18,185,22);
  // FIX (layout - meters relocated beside the chart): IN bar | OUT bar side by side near the top of
  // the panel, MATCH GAIN spanning the full width below them - replaces the old fixed 700/900,
  // y+62-relative spots that used to live down in the "FREQUENCY RANGE" box.
@@ -730,5 +794,5 @@ void PQAudioProcessorEditor::resized(){auto a=getLocalBounds();
  // FIX (preset restructure): overlay now anchored under the preset list/kebab on the LEFT, where
  // those controls actually live - and shrunk (no more list row inside it) to just fit name/save/
  // delete. Still only visible while the kebab is toggled on.
- presetPanel.setBounds(540,60,300,150);
+ presetPanel.setBounds(540,60,300,190);
 }
