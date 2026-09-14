@@ -37,7 +37,18 @@ public:
         std::atomic<float> freq{1000.f};
         std::atomic<float> gainDb{0.f};
         std::atomic<float> q{0.7f};
+        // Low Cut / High Cut only: the actual roll-off steepness in dB/octave, one of
+        // {6,12,18,24,36,48} - see kCutSlopeSteps. Scroll-wheel on a cut node cycles through these
+        // (see PluginEditor::mouseWheelMove) instead of adjusting q, since q's "resonance bump"
+        // reading was never what people meant by "steeper slope" on a cut filter.
+        std::atomic<int> slopeOrder{12};
     };
+    // The six standard slope steps a Low/High Cut node cycles through via mouse-wheel.
+    static constexpr std::array<int,6> kCutSlopeSteps{6,12,18,24,36,48};
+    // A cut's slope is built from a cascade of up to this many simple stages (1-pole = 6dB/oct,
+    // RBJ 2-pole = 12dB/oct) chained together - see rebuildManualCoefficients(). 48dB/oct needs 4
+    // two-pole stages, which is the largest case.
+    static constexpr int kMaxCutStages = 4;
     std::array<ManualBand,kMaxManualBands> manualBands{};
     std::atomic<bool> manualDirty{true};
     // Editor calls these instead of touching manualBands directly, so the processor can flag
@@ -48,6 +59,9 @@ public:
     void setManualBandType(int index,ManualType type);
     void setManualBandFreqGain(int index,float freq,float gainDb);
     void setManualBandQ(int index,float q);
+    // Sets a Low/High Cut band's roll-off steepness (see ManualBand::slopeOrder above). Ignored -
+    // has no effect on the DSP - for any other band type.
+    void setManualBandSlope(int index,int slopeOrderDbPerOct);
     // Changing a band's target mid-playback moves it between completely separate filter states
     // (L/R vs mono Mid vs mono Side - see manualStateL/R/Mid/Side below), so its old state is reset
     // to silence at the moment of the switch rather than carrying stale history into the new path,
@@ -120,13 +134,20 @@ private:
     float prevMono=0;
     std::atomic<bool> dirty{true};
 
-    // Manual EQ DSP: one coefficient set per possible band, plus one state per signal path it could
-    // be routed to. Only the state matching the band's current target is ever advanced in
-    // processBlock(); the others sit idle so switching target doesn't mix histories together.
-    std::array<Coeff,kMaxManualBands> manualCoeff{};
-    std::array<State,kMaxManualBands> manualStateL{},manualStateR{},manualStateMid{},manualStateSide{};
+    // Manual EQ DSP: up to kMaxCutStages coefficient sets per possible band (Bell/Shelf/Notch only
+    // ever use stage 0; Low/High Cut use as many stages as their slope needs - see
+    // rebuildManualCoefficients()), plus one state per signal path it could be routed to. Only the
+    // state matching the band's current target is ever advanced in processBlock(); the others sit
+    // idle so switching target doesn't mix histories together.
+    std::array<std::array<Coeff,kMaxCutStages>,kMaxManualBands> manualCoeff{};
+    std::array<int,kMaxManualBands> manualStageCount{};
+    std::array<std::array<State,kMaxCutStages>,kMaxManualBands> manualStateL{},manualStateR{},manualStateMid{},manualStateSide{};
     void rebuildManualCoefficients();
     static Coeff makeManualCoeff(ManualType,float freqHz,float gainDb,float q,double sampleRate);
+    // Single first-order (6dB/oct) high-pass/low-pass stage, used as a building block for the odd
+    // (6, 18, 36... only 18 in our step list) slope steps that a whole number of 2-pole (12dB/oct)
+    // stages can't hit exactly on their own.
+    static Coeff make1PoleCut(bool highpass,float hz,double sampleRate);
 
     static float logFreq(float); static float interp(const std::array<float,kBins>&,float);
     static float interpAtomic(const std::array<std::atomic<float>,kBins>&,float);
