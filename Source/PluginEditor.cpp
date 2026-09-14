@@ -24,7 +24,18 @@ PresetPanel::PresetPanel(PQAudioProcessor& proc):p(proc){
     list.onChange=[this]{
         auto name=list.getText(); if(name.isEmpty()) return;
         auto f=presetDir().getChildFile(name+".pqref");
-        if(p.loadReference(f) && onPresetLoaded) onPresetLoaded();
+        // FIX (B2): picking a preset used to load it instantly with no warning - one stray click
+        // while mid-tweak could silently throw the work away. Only prompt when there's actually
+        // something to lose (p.presetDirty, set by every manual-EQ edit/slider/button that changes
+        // saveable state - see PQAudioProcessor::presetDirty); a clean state loads immediately as
+        // before, since there's nothing to warn about.
+        auto doLoad=[this,f]{ if(p.loadReference(f) && onPresetLoaded) onPresetLoaded(); };
+        if(p.presetDirty.load()){
+            auto opts=juce::MessageBoxOptions::makeOptionsOkCancel(
+                juce::MessageBoxIconType::WarningIcon,"Unsaved Changes",
+                "Loading this preset will discard your unsaved changes. Load anyway?","Load","Cancel",this);
+            juce::AlertWindow::showAsync(opts,[this,doLoad](int result){ if(result==1) doLoad(); else refreshList(); /* revert the combo box's shown selection */ });
+        } else doLoad();
     };
     addAndMakeVisible(nameBox); nameBox.setTextToShowWhenEmpty("New preset name...",muted()); nameBox.setColour(juce::TextEditor::backgroundColourId,bg()); nameBox.setColour(juce::TextEditor::textColourId,white());
     for(auto*b:{&saveBtn,&deleteBtn,&closeBtn}){ addAndMakeVisible(*b); b->setColour(juce::TextButton::buttonColourId,panel()); b->setColour(juce::TextButton::textColourOffId,white()); b->setColour(juce::TextButton::textColourOnId,white()); }
@@ -35,14 +46,29 @@ PresetPanel::PresetPanel(PQAudioProcessor& proc):p(proc){
         juce::String safe; for(auto c:name) safe += juce::CharacterFunctions::isLetterOrDigit(c)||c==' '||c=='-'||c=='_' ? juce::String::charToString(c) : juce::String();
         if(safe.isEmpty()) safe="Preset";
         auto f=presetDir().getChildFile(safe+".pqref");
-        p.saveReference(f);
-        nameBox.setText({},juce::dontSendNotification);
-        refreshList();
+        auto doSave=[this,f]{ p.saveReference(f); nameBox.setText({},juce::dontSendNotification); refreshList(); };
+        // FIX (B2): saving over an existing name used to silently replace the file. Now confirms
+        // first - only when the target file actually already exists, so the common case (a genuinely
+        // new name) still saves in one click.
+        if(f.existsAsFile()){
+            auto opts=juce::MessageBoxOptions::makeOptionsOkCancel(
+                juce::MessageBoxIconType::WarningIcon,"Overwrite Preset",
+                "\""+safe+"\" already exists. Overwrite it?","Overwrite","Cancel",this);
+            juce::AlertWindow::showAsync(opts,[doSave](int result){ if(result==1) doSave(); });
+        } else doSave();
     };
     deleteBtn.onClick=[this]{
         auto name=list.getText(); if(name.isEmpty()) return;
-        presetDir().getChildFile(name+".pqref").deleteFile();
-        refreshList();
+        // FIX (B2): delete used to happen instantly on click with no way back. Always confirm now -
+        // unlike Save/Load, there's no "safe, obviously-fine" case for a destructive delete to skip.
+        auto opts=juce::MessageBoxOptions::makeOptionsOkCancel(
+            juce::MessageBoxIconType::WarningIcon,"Delete Preset",
+            "Permanently delete \""+name+"\"? This can't be undone.","Delete","Cancel",this);
+        juce::AlertWindow::showAsync(opts,[this,name](int result){
+            if(result!=1) return;
+            presetDir().getChildFile(name+".pqref").deleteFile();
+            refreshList();
+        });
     };
     closeBtn.onClick=[this]{ setVisible(false); };
     refreshList();
@@ -80,7 +106,7 @@ PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcesso
  setupButton(widthStage,white()); widthStage.setButtonText(p.widthPostEq.load()?"POST":"PRE");
  // Toggles whether the mono-widener runs before the EQ correction (PRE, so the analyzer/match
  // "hears" the widened signal) or after it (POST, widening is the very last step on the output).
- widthStage.onClick=[this]{ bool now=!p.widthPostEq.load(); p.widthPostEq.store(now); widthStage.setButtonText(now?"POST":"PRE"); };
+ widthStage.onClick=[this]{ bool now=!p.widthPostEq.load(); p.widthPostEq.store(now); widthStage.setButtonText(now?"POST":"PRE"); p.presetDirty.store(true); };
 
  // FIX (item 4): STEREO/MID/SIDE are now independent on/off toggles instead of a mutually-exclusive
  // solo, so any combination - one alone, two together, or all three - can be shown on the analyzer
@@ -104,7 +130,7 @@ PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcesso
  midEqToggle.setDotColour(manualMidColour());
  sideEqToggle.setDotColour(manualSideColour());
 
- auto bind=[this](juce::Slider&s,std::atomic<float>&v){setupSlider(s,0,100,.1);s.setValue(v.load()*100);s.onValueChange=[this,&s,&v]{v.store((float)s.getValue()/100.f);p.applyMatch();};};bind(sAmt,p.stereoMatch);bind(mAmt,p.midMatch);bind(siAmt,p.sideMatch);
+ auto bind=[this](juce::Slider&s,std::atomic<float>&v){setupSlider(s,0,100,.1);s.setValue(v.load()*100);s.onValueChange=[this,&s,&v]{v.store((float)s.getValue()/100.f);p.applyMatch();p.presetDirty.store(true);};};bind(sAmt,p.stereoMatch);bind(mAmt,p.midMatch);bind(siAmt,p.sideMatch);
  setupSlider(low,20,20000,1);setupSlider(high,20,20000,1);setupSlider(width,0,100,.1);setupSlider(depth,0,200,1);
  // FIX: the frequency chart is drawn on a log scale (20Hz-20kHz), but these sliders were linear -
  // that mismatch is exactly why dragging near 20Hz raced across the whole chart while dragging near
@@ -112,7 +138,7 @@ PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcesso
  // (sqrt(20*20000)) makes the slider's feel match what's actually drawn.
  low.setSkewFactorFromMidPoint(632.45); high.setSkewFactorFromMidPoint(632.45);
  low.setValue(p.lowHz);high.setValue(p.highHz);width.setValue(p.widthAmount.load()*100);depth.setValue(p.widthDepth.load()*100);
- low.onValueChange=[this]{p.lowHz=low.getValue();p.applyMatch();};high.onValueChange=[this]{p.highHz=high.getValue();p.applyMatch();};width.onValueChange=[this]{p.widthAmount=width.getValue()/100.f;};depth.onValueChange=[this]{p.widthDepth=depth.getValue()/100.f;};
+ low.onValueChange=[this]{p.lowHz=low.getValue();p.applyMatch();p.presetDirty.store(true);};high.onValueChange=[this]{p.highHz=high.getValue();p.applyMatch();p.presetDirty.store(true);};width.onValueChange=[this]{p.widthAmount=width.getValue()/100.f;p.presetDirty.store(true);};depth.onValueChange=[this]{p.widthDepth=depth.getValue()/100.f;p.presetDirty.store(true);};
 
  // Max dB / Smoothing used to live here as sliders; they're fixed at sane working values in the
  // processor now (6dB / 0.35 octaves) and no longer exposed. This slot is now the input/output
@@ -120,11 +146,11 @@ PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcesso
  setupVerticalTrim(inputTrim); setupVerticalTrim(outputTrim);
  inputTrim.setRange(-24,24,.1); outputTrim.setRange(-24,24,.1);
  inputTrim.setValue(p.inputTrimDb.load()); outputTrim.setValue(p.outputTrimDb.load());
- inputTrim.onValueChange=[this]{p.inputTrimDb.store((float)inputTrim.getValue());};
- outputTrim.onValueChange=[this]{p.outputTrimDb.store((float)outputTrim.getValue());};
+ inputTrim.onValueChange=[this]{p.inputTrimDb.store((float)inputTrim.getValue());p.presetDirty.store(true);};
+ outputTrim.onValueChange=[this]{p.outputTrimDb.store((float)outputTrim.getValue());p.presetDirty.store(true);};
  setupButton(matchGainBtn,white());
  matchGainBtn.onClick=[this]{ p.matchGain(); outputTrim.setValue(p.outputTrimDb.load(),juce::dontSendNotification); status.setText("GAIN MATCHED",juce::dontSendNotification); };
- mode.addItem("MICRO SHIFT",1);mode.addItem("HAAS",2);mode.addItem("DECORRELATED",3);mode.setSelectedId((int)p.widthMode.load()+1);mode.onChange=[this]{p.widthMode=(PQAudioProcessor::WidthMode)(mode.getSelectedId()-1);};
+ mode.addItem("MICRO SHIFT",1);mode.addItem("HAAS",2);mode.addItem("DECORRELATED",3);mode.setSelectedId((int)p.widthMode.load()+1);mode.onChange=[this]{p.widthMode=(PQAudioProcessor::WidthMode)(mode.getSelectedId()-1);p.presetDirty.store(true);};
  capture.onClick=[this]{p.captureReference();status.setText("REFERENCE CAPTURED",juce::dontSendNotification);};apply.onClick=[this]{p.applyMatch();status.setText("MATCH UPDATED",juce::dontSendNotification);};clear.onClick=[this]{p.clearReference();status.setText("REFERENCE CLEARED",juce::dontSendNotification);};
 
  // FIX (item 6): SAVE/LOAD are gone from the bottom row. A single PRESETS button up top toggles a
@@ -340,8 +366,8 @@ void PQAudioProcessorEditor::drawManualEq(juce::Graphics& g){
                 case T::Notch: { double bw=0.3/q; totalDb += -24.0*std::exp(-(logr*logr)/(2.0*bw*bw)); break; }
                 case T::LowShelf: totalDb += gain*(1.0/(1.0+std::exp(4.0*logr))); break;
                 case T::HighShelf: totalDb += gain*(1.0/(1.0+std::exp(-4.0*logr))); break;
-                case T::LowCut: totalDb += (hz<f0) ? -juce::jmin(48.0, (double)mb.slopeOrder.load()*(-logr)) : 0.0; break;
-                case T::HighCut: totalDb += (hz>f0) ? -juce::jmin(48.0, (double)mb.slopeOrder.load()*logr) : 0.0; break;
+                case T::LowCut: totalDb += (hz<f0) ? -juce::jmin(96.0, (double)mb.slopeOrder.load()*(-logr)) : 0.0; break;
+                case T::HighCut: totalDb += (hz>f0) ? -juce::jmin(96.0, (double)mb.slopeOrder.load()*logr) : 0.0; break;
             }
         }
         return totalDb;
@@ -433,7 +459,7 @@ void PQAudioProcessorEditor::mouseWheelMove(const juce::MouseEvent& e, const juc
     if(mb.type.load()==T::LowCut || mb.type.load()==T::HighCut){
         // FIX: scroll on a Low/High Cut node used to adjust Q, which only nudges the resonance
         // bump right at the cutoff - it never changed the actual roll-off, so nothing looked or
-        // sounded different. Scroll now steps through the six standard slopes instead, same as it
+        // sounded different. Scroll now steps through the standard slopes instead, same as it
         // already did (via Q) for Bell/Notch/Shelf - see setManualBandSlope() for the real DSP change.
         const auto& steps=PQAudioProcessor::kCutSlopeSteps;
         int cur=mb.slopeOrder.load(), idx=0;
