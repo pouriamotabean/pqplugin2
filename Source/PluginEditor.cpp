@@ -121,6 +121,16 @@ PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcesso
  mode.addItem("MICRO SHIFT",1);mode.addItem("HAAS",2);mode.addItem("DECORRELATED",3);mode.setSelectedId((int)p.widthMode.load()+1);mode.onChange=[this]{p.widthMode=(PQAudioProcessor::WidthMode)(mode.getSelectedId()-1);};
  capture.onClick=[this]{p.captureReference();status.setText("REFERENCE CAPTURED",juce::dontSendNotification);};apply.onClick=[this]{p.applyMatch();status.setText("MATCH UPDATED",juce::dontSendNotification);};clear.onClick=[this]{p.clearReference();status.setText("REFERENCE CLEARED",juce::dontSendNotification);};
 
+ // FIX (4 quick presets): each just drops one manual-EQ band with sensible starting values onto
+ // the existing mouse-driven EQ engine - freq/gain/Q stay fully editable afterwards exactly like any
+ // band you'd drag in by hand (drag to move, scroll to change Q, right-click to change type/target).
+ using MT=PQAudioProcessor::ManualTarget; using MType=PQAudioProcessor::ManualType;
+ for(auto* b:{&qpMono,&qpSideAir,&qpMidScoop,&qpLowClean}) setupButton(*b,white());
+ qpMono.onClick=[this]{ addQuickPreset(MType::LowCut,120.f,0.f,0.7f,MT::Side); status.setText("PRESET: MONO BELOW 120Hz",juce::dontSendNotification); };
+ qpSideAir.onClick=[this]{ addQuickPreset(MType::HighShelf,8000.f,4.f,0.7f,MT::Side); status.setText("PRESET: SIDE AIR BOOST",juce::dontSendNotification); };
+ qpMidScoop.onClick=[this]{ addQuickPreset(MType::Bell,500.f,-3.f,1.0f,MT::Mid); status.setText("PRESET: MID SCOOP @500Hz",juce::dontSendNotification); };
+ qpLowClean.onClick=[this]{ addQuickPreset(MType::LowCut,30.f,0.f,0.7f,MT::Mid); status.setText("PRESET: LOW-END CLEANUP",juce::dontSendNotification); };
+
  // FIX (item 6): SAVE/LOAD are gone from the bottom row. A single PRESETS button up top toggles a
  // small overlay (presetPanel) with the file list + Save/Delete - closer to how "professional"
  // plugins present preset browsing, and it stays out of the way (closed) until asked for.
@@ -154,6 +164,17 @@ void PQAudioProcessorEditor::syncControlsFromProcessor(){
 void PQAudioProcessorEditor::refreshBandButtons(){
  auto style=[](juce::TextButton&b,juce::Colour c,bool on){ b.setColour(juce::TextButton::textColourOffId, on?c:dim()); b.setColour(juce::TextButton::textColourOnId, on?c:dim()); };
  style(stereo,white(),p.stereoOn.load()); style(mid,yellow(),p.midOn.load()); style(side,blue(),p.sideOn.load());
+}
+
+void PQAudioProcessorEditor::addQuickPreset(PQAudioProcessor::ManualType type,float freq,float gainDb,float q,PQAudioProcessor::ManualTarget target){
+ p.addManualBand(type,freq,gainDb,q,target);
+ // Make sure the target this preset just touched is actually visible on the manual-EQ overlay,
+ // otherwise a first-time user clicking a preset would see no visual change at all.
+ using MT=PQAudioProcessor::ManualTarget;
+ if(target==MT::Mid) midEqToggle.setToggleState(true,juce::dontSendNotification);
+ else if(target==MT::Side) sideEqToggle.setToggleState(true,juce::dontSendNotification);
+ else stereoEqToggle.setToggleState(true,juce::dontSendNotification);
+ repaint();
 }
 
 void PQAudioProcessorEditor::setupButton(juce::TextButton&b,juce::Colour c){addAndMakeVisible(b);b.setColour(juce::TextButton::buttonColourId,panel());b.setColour(juce::TextButton::buttonOnColourId,grid());b.setColour(juce::TextButton::textColourOffId,c);b.setColour(juce::TextButton::textColourOnId,c);}
@@ -486,7 +507,14 @@ void PQAudioProcessorEditor::showAddBandMenu(juce::Point<float> chartPos, juce::
 }
 
 void PQAudioProcessorEditor::paint(juce::Graphics&g){g.fillAll(bg());auto a=getLocalBounds().toFloat();g.setColour(white());g.setFont(juce::FontOptions(29).withStyle("bold"));g.drawText("PQ",28,20,62,32,juce::Justification::left);g.setFont(juce::FontOptions(10));g.setColour(muted());g.drawText("PERFECTION OF MATCH EQ   /   POURIA MOTABEAN",91,25,420,22,juce::Justification::left);
- auto chart=a.reduced(24,72).withHeight(a.getHeight()*.48f);g.setColour(panel());g.fillRoundedRectangle(chart,14);for(int i=1;i<12;i++){float x=chart.getX()+chart.getWidth()*i/12;g.setColour(grid());g.drawVerticalLine((int)x,chart.getY(),chart.getBottom());}
+ auto chart=a.reduced(24,72).withHeight(a.getHeight()*.48f);
+ // Drop shadow under the analyzer panel, drawn before the panel itself so the panel sits on top of it.
+ {
+     juce::Path chartShadowPath; chartShadowPath.addRoundedRectangle(chart,14.f);
+     juce::DropShadow shadow(juce::Colours::black.withAlpha(0.55f), 18, juce::Point<int>(0,7));
+     shadow.drawForPath(g, chartShadowPath);
+ }
+ g.setColour(panel());g.fillRoundedRectangle(chart,14);for(int i=1;i<12;i++){float x=chart.getX()+chart.getWidth()*i/12;g.setColour(grid());g.drawVerticalLine((int)x,chart.getY(),chart.getBottom());}
  chartArea=chart; // remembered for mouseDown/Drag/Up hit-testing and coordinate mapping
  drawFreqDbAxis(g,chart); // horizontal dB gridlines (replaces the old un-labelled 7-line grid) + extra freq labels
  drawRangeMask(g,chart);
@@ -535,6 +563,7 @@ void PQAudioProcessorEditor::paint(juce::Graphics&g){g.fillAll(bg());auto a=getL
  // shared status line for CAPTURE/APPLY/CLEAR/SAVE/LOAD/MATCH GAIN feedback, so give it a caption
  // instead of removing the (still useful) shared line.
  label(g,"STATUS",{(float)(a.getRight()-320),(float)y+190-16,100,14},muted());
+ label(g,"QUICK PRESETS",{320.f,(float)y+190-16,200,14},muted());
 }
 void PQAudioProcessorEditor::resized(){auto a=getLocalBounds();
  // FIX (item 6): PRESETS sits left of STEREO/MID/SIDE at the top, matching where a "professional"
@@ -557,7 +586,9 @@ void PQAudioProcessorEditor::resized(){auto a=getLocalBounds();
  inputMeterArea={700.f,(float)(y+62),70.f,108.f}; outputMeterArea={900.f,(float)(y+62),70.f,108.f};
  inputTrim.setBounds(inputMeterArea.toNearestInt()); outputTrim.setBounds(outputMeterArea.toNearestInt());
  matchGainBtn.setBounds(785,y+101,100,30);
- mode.setBounds(210,y+115,180,25);width.setBounds(410,y+115,250,25);widthStage.setBounds(210,y+147,90,25);depth.setBounds(410,y+147,250,25);capture.setBounds(42,y+190,90,30);apply.setBounds(140,y+190,80,30);clear.setBounds(230,y+190,75,30);status.setBounds(a.getRight()-320,y+190,300,30);
+ mode.setBounds(210,y+115,180,25);width.setBounds(410,y+115,250,25);widthStage.setBounds(210,y+147,90,25);depth.setBounds(410,y+147,250,25);capture.setBounds(42,y+190,90,30);apply.setBounds(140,y+190,80,30);clear.setBounds(230,y+190,75,30);
+ { int qx=320; for(auto* b:{&qpMono,&qpSideAir,&qpMidScoop,&qpLowClean}){ b->setBounds(qx,y+190,110,30); qx+=118; } }
+ status.setBounds(a.getRight()-320,y+190,300,30);
  // FIX (item 6): preset overlay - anchored top-right under the header buttons. It's only visible
  // while PRESETS is toggled on, so briefly covering part of the analyzer chart while browsing/
  // saving presets is expected (same as most plugins' preset browsers).
