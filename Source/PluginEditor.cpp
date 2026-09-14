@@ -245,20 +245,22 @@ void addSmoothedPoint(juce::Path& q, juce::Point<float> prev, juce::Point<float>
     juce::Point<float> mid=prev+(cur-prev)*0.5f;
     q.quadraticTo(prev,mid);
 }
-// FIX (glow request): soft colour-matched shadow filled beneath a line, fading to transparent over a
-// fixed distance below wherever the curve actually sits (not tied to the chart's absolute top/bottom -
-// that would make a curve near the bottom of the chart barely glow at all, since the fade would
-// already be mostly spent by the time it reached the line). `lineOnly` is the open stroke path for
-// the curve itself; this closes a copy of it down to `bottom` to get a fillable shape.
-void glowUnder(juce::Graphics& g, const juce::Path& lineOnly, float bottom, float left, float right, juce::Colour c, float alpha=0.22f, float maxFadeDistance=140.f){
+// FIX (glow not showing on jagged curves): this used to be a single vertical gradient anchored to
+// the curve's overall peak point, fading to transparent over a fixed distance below it. That works
+// for a smooth curve that stays near one height, but for the jagged live analyzer curve - which
+// swings from near +20 down to -20 across the chart - only the few pixels right at the single
+// highest peak ever fell inside that fade window; everywhere else the gradient had already reached
+// zero alpha long before reaching the actual curve at that x position, so it looked like no glow at
+// all. A flat, uniform semi-transparent fill (same colour as the line, one alpha, no gradient) is
+// both simpler and what was actually asked for - a plain translucent area under the curve everywhere
+// along its length, not just near the peak.
+void glowUnder(juce::Graphics& g, const juce::Path& lineOnly, float bottom, float left, float right, juce::Colour c, float alpha=0.18f){
     juce::Path fillPath(lineOnly);
     fillPath.lineTo(right,bottom);
     fillPath.lineTo(left,bottom);
     fillPath.closeSubPath();
-    auto bounds=fillPath.getBounds();
-    float fadeDist=juce::jmin(maxFadeDistance,bounds.getHeight());
-    juce::ColourGradient glow(c.withAlpha(alpha),0,bounds.getY(),c.withAlpha(0.f),0,bounds.getY()+fadeDist,false);
-    g.setGradientFill(glow); g.fillPath(fillPath);
+    g.setColour(c.withAlpha(alpha));
+    g.fillPath(fillPath);
 }
 }
 void PQAudioProcessorEditor::drawCurve(juce::Graphics&g,juce::Rectangle<float>r,const std::array<std::atomic<float>,PQAudioProcessor::kBins>&a,juce::Colour c){
@@ -279,7 +281,7 @@ void PQAudioProcessorEditor::drawCurve(juce::Graphics&g,juce::Rectangle<float>r,
  juce::Path strokeShape; juce::PathStrokeType(1.8f).createStrokedPath(strokeShape,q);
  juce::DropShadow curveShadow(juce::Colours::black.withAlpha(0.55f),8,juce::Point<int>(0,3));
  curveShadow.drawForPath(g,strokeShape);
- glowUnder(g,q,r.getBottom(),r.getX(),r.getRight(),c,0.32f);
+ glowUnder(g,q,r.getBottom(),r.getX(),r.getRight(),c,0.16f);
  g.setColour(c);g.strokePath(q,juce::PathStrokeType(1.8f));
 }
 void PQAudioProcessorEditor::drawRef(juce::Graphics&g,juce::Rectangle<float>r,const std::array<std::atomic<float>,PQAudioProcessor::kBins>&a,juce::Colour c){
@@ -439,7 +441,7 @@ void PQAudioProcessorEditor::drawManualEq(juce::Graphics& g){
         // from a barely-visible 0.16 to something that actually reads next to the analyzer's own.
         juce::Path curveStrokeShape; juce::PathStrokeType(2.0f).createStrokedPath(curveStrokeShape,curve);
         juce::DropShadow(juce::Colours::black.withAlpha(0.4f),6,juce::Point<int>(0,2)).drawForPath(g,curveStrokeShape);
-        glowUnder(g,curve,chartArea.getBottom(),chartArea.getX(),chartArea.getRight(),c,0.26f);
+        glowUnder(g,curve,chartArea.getBottom(),chartArea.getX(),chartArea.getRight(),c,0.13f);
         g.setColour(c.withAlpha(0.9f)); g.strokePath(curve, juce::PathStrokeType(2.0f));
     };
     drawTargetCurve(MT::Stereo, manualStereoColour());
@@ -643,11 +645,16 @@ void PQAudioProcessorEditor::paint(juce::Graphics&g){
      juce::ColourGradient panelGrad(juce::Colour(0xff141a22),ctrlPanel.getX(),ctrlPanel.getY(),juce::Colour(0xff0c0f14),ctrlPanel.getX(),ctrlPanel.getBottom(),false);
      g.setGradientFill(panelGrad); g.fillRoundedRectangle(ctrlPanel,14.f);
  }
- label(g,"MATCH AMOUNT",{42,chart.getBottom()+47,150,18},muted());label(g,"FREQUENCY RANGE",{700,chart.getBottom()+47,180,18},muted());label(g,"MONO → STEREO",{42,chart.getBottom()+153,180,18},muted());
+ label(g,"MATCH AMOUNT",{42,chart.getBottom()+47,150,18},muted());label(g,"FREQUENCY RANGE",{700,chart.getBottom()+47,180,18},muted());
  int y=(int)chart.getBottom()+70;
  label(g,"STEREO",{45,(float)y+2,80,18},white()); label(g,"MID",{45,(float)y+34,80,18},yellow()); label(g,"SIDE",{45,(float)y+66,80,18},blue());
  label(g,"LOW HZ",{700,(float)y+2,100,18},muted()); label(g,"HIGH HZ",{900,(float)y+2,100,18},muted());
- label(g,"MODE",{210,(float)y+100,100,18},muted()); label(g,"WIDTH AMT",{410,(float)y+100,100,18},muted()); label(g,"STAGE",{210,(float)y+132,100,18},muted()); label(g,"DEPTH %",{410,(float)y+132,100,18},muted());
+ // FIX (layout - your mockup): MODE/WIDTH/STAGE/DEPTH moved out of their old disconnected spot
+ // (floating below MATCH AMOUNT, in a column with nothing above or below it) and into the same right
+ // column as FREQUENCY RANGE, directly under LOW/HIGH HZ - fills the space that used to just sit
+ // empty there once the meters moved out, and reads as one coherent box instead of three scattered ones.
+ label(g,"STEREOIZATION",{700,(float)y+88,180,16},muted());
+ label(g,"MODE",{700,(float)y+100,100,18},muted()); label(g,"WIDTH AMT",{900,(float)y+100,100,18},muted()); label(g,"STAGE",{700,(float)y+132,100,18},muted()); label(g,"DEPTH %",{900,(float)y+132,100,18},muted());
  // FIX (layout - meters relocated beside the chart, per the reference): its own small panel, with
  // the same shadow+gradient treatment as the main chart/control panels, sitting directly right of
  // the analyzer instead of buried in the bottom "FREQUENCY RANGE" box.
@@ -673,7 +680,7 @@ void PQAudioProcessorEditor::paint(juce::Graphics&g){
  // FIX (item 7): "GAIN MATCHED"/etc used to float in the corner with nothing to explain it. It's a
  // shared status line for CAPTURE/APPLY/CLEAR/SAVE/LOAD/MATCH GAIN feedback, so give it a caption
  // instead of removing the (still useful) shared line.
- label(g,"STATUS",{(float)(a.getRight()-320),(float)y+190-16,100,14},muted());
+ label(g,"STATUS",{325.f,(float)y+190-16,100,14},muted());
 }
 void PQAudioProcessorEditor::resized(){auto a=getLocalBounds();
  // FIX (preset restructure): the preset dropdown + kebab now live on the LEFT of the header, right
@@ -718,8 +725,8 @@ void PQAudioProcessorEditor::resized(){auto a=getLocalBounds();
      inputTrim.setBounds(inputMeterArea.toNearestInt()); outputTrim.setBounds(outputMeterArea.toNearestInt());
      matchGainBtn.setBounds(btnRow.toNearestInt());
  }
- mode.setBounds(210,y+115,180,25);width.setBounds(410,y+115,250,25);widthStage.setBounds(210,y+147,90,25);depth.setBounds(410,y+147,250,25);capture.setBounds(42,y+190,90,30);apply.setBounds(140,y+190,80,30);clear.setBounds(230,y+190,75,30);
- status.setBounds(a.getRight()-320,y+190,300,30);
+ mode.setBounds(700,y+115,185,25);width.setBounds(900,y+115,185,25);widthStage.setBounds(700,y+147,90,25);depth.setBounds(900,y+147,185,25);capture.setBounds(42,y+190,90,30);apply.setBounds(140,y+190,80,30);clear.setBounds(230,y+190,75,30);
+ status.setBounds(325,y+190,300,30);
  // FIX (preset restructure): overlay now anchored under the preset list/kebab on the LEFT, where
  // those controls actually live - and shrunk (no more list row inside it) to just fit name/save/
  // delete. Still only visible while the kebab is toggled on.
