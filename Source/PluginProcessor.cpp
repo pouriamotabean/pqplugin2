@@ -62,7 +62,7 @@ void PQAudioProcessor::prepareToPlay(double sampleRate,int samplesPerBlock){
     // have enough room to use musically real delay times (see applyWidth in processBlock).
     widthBufSize = juce::jmax(64,(int)std::round(sr.load()*0.05)+8); widthDelay.assign((size_t)widthBufSize,0.f); widthWriteIdx=0;
     for(int i=0;i<kBands;++i){float t=i/float(kBands-1); bandHz[i]=std::exp(std::log(20.f)+t*(std::log(20000.f)-std::log(20.f)));}
-    stStereoL.fill({});stStereoR.fill({});stMid.fill({});stSide.fill({}); manualStateL.fill({}); manualStateR.fill({}); manualStateMid.fill({}); manualStateSide.fill({});
+    stStereoL.fill({});stStereoR.fill({});stMid.fill({});stSide.fill({}); manualStateL.fill({}); manualStateR.fill({}); manualStateMid.fill({}); manualStateSide.fill({}); monoMakerState.fill({});
     // FIX (B1): per-block scratch for this block's raw mid/side samples, handed to the analysis
     // thread once per block instead of written into the FFT history one sample at a time inline.
     blockMid.assign((size_t)juce::jmax(64,samplesPerBlock),0.f); blockSide.assign((size_t)juce::jmax(64,samplesPerBlock),0.f);
@@ -96,6 +96,7 @@ void PQAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
     // Mid+Side off left it correcting silence - exactly the reported "input but no output" bug.
     // Mid, Side, and Stereo correction now always run, unconditionally, regardless of button state.
     const float widthAmt=juce::jlimit(0.f,1.f,widthAmount.load());
+    const float monoAmt=juce::jlimit(0.f,1.f,monoMakerAmount.load());
     const float widthDep=widthDepth.load();
     const WidthMode wMode=widthMode.load();
     const bool widthPost=widthPostEq.load();
@@ -195,6 +196,15 @@ void PQAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
                 L=process(manualCoeff[(size_t)mbI][(size_t)st],manualStateL[(size_t)mbI][(size_t)st],L);
                 R=process(manualCoeff[(size_t)mbI][(size_t)st],manualStateR[(size_t)mbI][(size_t)st],R);
             }
+        }
+        // Mono Maker: re-derives Side from the truly-final L/R (after everything above, including
+        // Width whichever stage it ran at) and highpasses it - this is deliberately the very last
+        // DSP step so it always sees the real final Side content, not an intermediate one.
+        if(monoAmt>0.0001f){
+            float fm=0.5f*(L+R), fs=0.5f*(L-R);
+            fs=process(monoMakerCoeff[0],monoMakerState[0],fs);
+            fs=process(monoMakerCoeff[1],monoMakerState[1],fs);
+            L=fm+fs; R=fm-fs;
         }
         L*=outGain; R*=outGain;
         b.setSample(0,i,L); if(ch>1)b.setSample(1,i,R); outSum += .5f*(L*L+R*R);
@@ -421,6 +431,15 @@ void PQAudioProcessor::rebuildManualCoefficients(){
             manualStageCount[(size_t)i]=1;
         }
     }
+    // Mono Maker: log-mapped 20Hz-20kHz cutoff, two identical 2-pole highpass stages (24dB/oct
+    // combined) - see the ManualBand-adjacent comment on monoMakerAmount in the header for why a
+    // highpass on Side achieves "mono at 100%".
+    {
+        float amt=juce::jlimit(0.f,1.f,monoMakerAmount.load());
+        float freq=20.f*std::pow(1000.f,amt); // 20 -> 20000 Hz as amt goes 0 -> 1
+        monoMakerCoeff[0]=makeManualCoeff(ManualType::LowCut,freq,0.f,0.7071f,srv);
+        monoMakerCoeff[1]=monoMakerCoeff[0];
+    }
 }
 int PQAudioProcessor::addManualBand(ManualType type,float freq,float gainDb,float q,ManualTarget target){
     for(int i=0;i<kMaxManualBands;++i){ auto& mb=manualBands[(size_t)i];
@@ -531,12 +550,13 @@ bool PQAudioProcessor::importReferenceOnly(const juce::File& f){
 
 void PQAudioProcessor::getStateInformation(juce::MemoryBlock& d){
     juce::MemoryOutputStream o(d,true);
-    o.writeInt(0x5051533a); // FIX: version bumped (was 0x50515339) to add gainMatchMode (I3)
+    o.writeInt(0x5051533b); // FIX: version bumped (was 0x5051533a) to add monoMakerAmount
     for(float v:{stereoMatch.load(),midMatch.load(),sideMatch.load(),lowHz.load(),highHz.load(),maxCorrectionDb.load(),smoothingOctaves.load(),widthAmount.load(),widthDepth.load()})o.writeFloat(v);
     o.writeInt((int)widthMode.load());
     o.writeBool(widthPostEq.load());
     o.writeFloat(inputTrimDb.load()); o.writeFloat(outputTrimDb.load());
     o.writeInt((int)gainMatchMode.load());
+    o.writeFloat(monoMakerAmount.load());
     o.writeBool(hasReference.load());
     if(hasReference.load()) for(auto* a:{&refStereo,&refMid,&refSide}) for(int i=0;i<kBins;++i) o.writeFloat((*a)[(size_t)i].load());
     o.writeInt(kMaxManualBands);
@@ -556,13 +576,14 @@ bool PQAudioProcessor::applyStateBlock(const void* data,int size){
         lowHz.store(in.readFloat());highHz.store(in.readFloat());maxCorrectionDb.store(in.readFloat());smoothingOctaves.store(in.readFloat());
         hasReference.store(true); applyMatch(); presetDirty.store(false); return true;
     }
-    if(magic!=0x5051533a && magic!=0x50515339 && magic!=0x50515338 && magic!=0x50515337 && magic!=0x50515336 && magic!=0x50515335 && magic!=0x50515334 && magic!=0x50515333 && magic!=0x50515332) return false; // unknown/corrupt state: ignore rather than risk misreading garbage into the DSP
-    bool hasGainMatchMode = (magic==0x5051533a);
-    bool hasSlopeOrder = (magic==0x5051533a || magic==0x50515339);
-    bool hasManualTarget = (magic==0x5051533a || magic==0x50515339 || magic==0x50515338);
-    bool hasTrim = (magic==0x5051533a || magic==0x50515339 || magic==0x50515338 || magic==0x50515337);
-    bool hasManualEq = (magic==0x5051533a || magic==0x50515339 || magic==0x50515338 || magic==0x50515337 || magic==0x50515336);
-    bool hasWidthStage = (magic==0x5051533a || magic==0x50515339 || magic==0x50515338 || magic==0x50515337 || magic==0x50515336 || magic==0x50515335);
+    if(magic!=0x5051533b && magic!=0x5051533a && magic!=0x50515339 && magic!=0x50515338 && magic!=0x50515337 && magic!=0x50515336 && magic!=0x50515335 && magic!=0x50515334 && magic!=0x50515333 && magic!=0x50515332) return false; // unknown/corrupt state: ignore rather than risk misreading garbage into the DSP
+    bool hasMonoMaker = (magic==0x5051533b);
+    bool hasGainMatchMode = (magic==0x5051533b || magic==0x5051533a);
+    bool hasSlopeOrder = (magic==0x5051533b || magic==0x5051533a || magic==0x50515339);
+    bool hasManualTarget = (magic==0x5051533b || magic==0x5051533a || magic==0x50515339 || magic==0x50515338);
+    bool hasTrim = (magic==0x5051533b || magic==0x5051533a || magic==0x50515339 || magic==0x50515338 || magic==0x50515337);
+    bool hasManualEq = (magic==0x5051533b || magic==0x5051533a || magic==0x50515339 || magic==0x50515338 || magic==0x50515337 || magic==0x50515336);
+    bool hasWidthStage = (magic==0x5051533b || magic==0x5051533a || magic==0x50515339 || magic==0x50515338 || magic==0x50515337 || magic==0x50515336 || magic==0x50515335);
     bool hadOldEnableFlags = (magic==0x50515333); // v3 wrote 3 bools we no longer use; skip them so the rest of the stream stays aligned
     stereoMatch.store(in.readFloat());midMatch.store(in.readFloat());sideMatch.store(in.readFloat());
     lowHz.store(in.readFloat());highHz.store(in.readFloat());maxCorrectionDb.store(in.readFloat());smoothingOctaves.store(in.readFloat());
@@ -572,6 +593,7 @@ bool PQAudioProcessor::applyStateBlock(const void* data,int size){
     if(hadOldEnableFlags){ in.readBool(); in.readBool(); in.readBool(); }
     if(hasTrim){ inputTrimDb.store(in.readFloat()); outputTrimDb.store(in.readFloat()); } else { inputTrimDb.store(0.f); outputTrimDb.store(0.f); }
     gainMatchMode.store(hasGainMatchMode ? (GainMatchMode)in.readInt() : GainMatchMode::Peak);
+    monoMakerAmount.store(hasMonoMaker ? in.readFloat() : 0.f);
     bool hr=in.readBool();
     if(hr) for(auto* a:{&refStereo,&refMid,&refSide}) for(int i=0;i<kBins;++i) (*a)[(size_t)i].store(in.readFloat());
     hasReference.store(hr);
