@@ -102,6 +102,13 @@ public:
     std::atomic<float> stereoMatch{0},midMatch{0},sideMatch{0};
     std::atomic<float> lowHz{20},highHz{20000},maxCorrectionDb{6},smoothingOctaves{0.35f};
     std::atomic<float> widthAmount{0},widthDepth{1};
+    // Mono Maker: 0-100%, mapped log-scale to a 20Hz-20kHz cutoff for a fixed-slope (24dB/oct) cut
+    // on the Side signal above... below that cutoff, i.e. a highpass on Side. At 0% the cutoff sits
+    // at 20Hz (no audible effect); at 100% it sits at 20kHz, which removes essentially all Side
+    // content - the whole signal goes mono. Applied at the very end of the chain, recomputed
+    // directly from the final L/R, so it works identically regardless of the Width PRE/POST setting
+    // (see processBlock) - it doesn't need to know where any Side content it's cutting came from.
+    std::atomic<float> monoMakerAmount{0.f};
     std::atomic<WidthMode> widthMode{WidthMode::MicroShift};
     // Input/output trim, in dB, applied at the very start / very end of the chain. Each is user-
     // draggable from its own vertical meter in the editor. matchGain() is the "MATCH GAIN" button:
@@ -150,6 +157,16 @@ public:
     // practice can produce clicks/torn values). Atomics make every read/write well-defined, no locks
     // needed since these are single float reads/writes.
     std::array<std::atomic<float>,kBins> refStereo{},refMid{},refSide{};
+    // The auto-match correction gain per band, in dB - i.e. exactly the EQ curve buildCorrection()
+    // computed from the reference (output-minus-input, in dB, is literally what an EQ gain curve
+    // is). Public so the editor can draw it directly as the "delta" overlay - what the automatic
+    // matching is actually adding/removing - without needing a second live analyzer on the
+    // processed signal. FIX (B1): atomic because buildCorrection() runs on the background analysis
+    // thread while rebuildCoefficients() reads it on the audio thread and the editor reads it for
+    // painting - three readers/writers across two threads, plain floats would be a data race.
+    std::array<std::atomic<float>,kBands> corrStereo{},corrMid{},corrSide{};
+    // The kBands correction-band centre frequencies (log-spaced 20Hz-20kHz) - public so the editor
+    // can place corrStereo/corrMid/corrSide's points at the right x position on the chart.
     std::array<float,kBands> bandHz{};
     std::atomic<float> inputRmsDb{-90}, outputRmsDb{-90};
     // Peak-hold meters (instantaneous peak, held then released at a slow fixed dB/sec rate - see
@@ -182,10 +199,6 @@ private:
     // notices capturingReference flip from false to true (see captureWasActive in analyzeAndUpdate()).
     std::array<double,kBins> captureAccumStereo{},captureAccumMid{},captureAccumSide{};
     int captureFrameCount=0; double captureElapsedSec=0.0; bool captureWasActive=false;
-    // FIX (B1): these move from a plain float array to atomic - they're built by buildCorrection()
-    // which now runs on the background analysis thread, but read by rebuildCoefficients() on the
-    // audio thread whenever `dirty` is set. Same reasoning as refStereo/refMid/refSide above.
-    std::array<std::atomic<float>,kBands> corrStereo{},corrMid{},corrSide{};
     std::array<Coeff,kBands> stereoCoeff{},midCoeff{},sideCoeff{};
     struct State{float z1=0,z2=0;}; std::array<State,kBands> stStereoL{},stStereoR{},stMid{},stSide{};
     // FIX (widener too subtle): the delay line used to be a fixed 64-sample array, which is under
@@ -204,6 +217,10 @@ private:
     std::array<std::array<Coeff,kMaxCutStages>,kMaxManualBands> manualCoeff{};
     std::array<int,kMaxManualBands> manualStageCount{};
     std::array<std::array<State,kMaxCutStages>,kMaxManualBands> manualStateL{},manualStateR{},manualStateMid{},manualStateSide{};
+    // Mono Maker's own fixed-slope filter (2 cascaded 2-pole stages = 24dB/oct) - single channel
+    // since it runs on the Side signal alone, rebuilt in rebuildManualCoefficients() alongside the
+    // manual EQ bands whenever monoMakerAmount changes (same manualDirty flag).
+    std::array<Coeff,2> monoMakerCoeff{}; std::array<State,2> monoMakerState{};
     void rebuildManualCoefficients();
     static Coeff makeManualCoeff(ManualType,float freqHz,float gainDb,float q,double sampleRate);
     // Single first-order (6dB/oct) high-pass/low-pass stage, used as a building block for the odd
