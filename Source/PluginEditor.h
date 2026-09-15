@@ -43,8 +43,8 @@ public:
     void paintButton(juce::Graphics& g, bool isMouseOver, bool) override {
         auto r=getLocalBounds().toFloat();
         bool on=getToggleState();
-        g.setColour(juce::Colour(0xff101419)); g.fillRoundedRectangle(r,r.getHeight()*0.5f);
-        g.setColour(on?colour.withAlpha(0.85f):juce::Colour(0xff242a31));
+        g.setColour(juce::Colour(0xff141b25)); g.fillRoundedRectangle(r,r.getHeight()*0.5f);
+        g.setColour(on?colour.withAlpha(0.85f):juce::Colour(0xff313942));
         g.drawRoundedRectangle(r.reduced(0.75f),r.getHeight()*0.5f,1.2f);
         float dotR=4.f, dotX=r.getX()+16.f, dotY=r.getCentreY();
         g.setColour(on?colour:colour.withAlpha(isMouseOver?0.6f:0.35f));
@@ -66,8 +66,8 @@ public:
     KebabButton():juce::Button({}){}
     void paintButton(juce::Graphics& g, bool isMouseOver, bool) override {
         auto r=getLocalBounds().toFloat();
-        g.setColour(juce::Colour(0xff101419)); g.fillRoundedRectangle(r,8.f);
-        g.setColour(juce::Colour(0xff242a31)); g.drawRoundedRectangle(r.reduced(0.75f),8.f,1.f);
+        g.setColour(juce::Colour(0xff141b25)); g.fillRoundedRectangle(r,8.f);
+        g.setColour(juce::Colour(0xff313942)); g.drawRoundedRectangle(r.reduced(0.75f),8.f,1.f);
         g.setColour(isMouseOver?juce::Colour(0xfff2f4f7):juce::Colour(0xff737e89));
         float cx=r.getCentreX(), cy=r.getCentreY(), spacing=6.f, rad=1.7f;
         for(int i=-1;i<=1;++i) g.fillEllipse(cx-rad,cy+(float)i*spacing-rad,rad*2.f,rad*2.f);
@@ -138,7 +138,7 @@ public:
         }
         float trackH=4.f, cy=(float)y+(float)height*0.5f;
         juce::Rectangle<float> full((float)x,cy-trackH*0.5f,(float)width,trackH);
-        g.setColour(juce::Colour(0xff242a31)); g.fillRoundedRectangle(full,trackH*0.5f);
+        g.setColour(juce::Colour(0xff313942)); g.fillRoundedRectangle(full,trackH*0.5f);
         float filledW=juce::jmax(0.f, sliderPos-(float)x);
         if(filledW>1.f){
             juce::Rectangle<float> filled((float)x,cy-trackH*0.5f,filledW,trackH);
@@ -163,7 +163,7 @@ private:
         float trackW=4.f, cx=(float)x+(float)width*0.5f;
         float top=(float)y, bottom=(float)y+(float)height;
         juce::Rectangle<float> full(cx-trackW*0.5f,top,trackW,bottom-top);
-        g.setColour(juce::Colour(0xff242a31)); g.fillRoundedRectangle(full,trackW*0.5f);
+        g.setColour(juce::Colour(0xff313942)); g.fillRoundedRectangle(full,trackW*0.5f);
         g.setColour(juce::Colours::white.withAlpha(0.18f));
         for(int i=0;i<=4;++i){
             float ty=top+(bottom-top)*(i/4.f);
@@ -198,7 +198,7 @@ public:
         g.setColour(juce::Colours::black.withAlpha(0.5f));
         g.fillRoundedRectangle(r.translated(0.f,2.f),corner);
         auto face=r.withTrimmedBottom(2.f);
-        juce::Colour top = isDown? juce::Colour(0xff0c0f14) : (isMouseOver? juce::Colour(0xff1b222c): juce::Colour(0xff141a22));
+        juce::Colour top = isDown? juce::Colour(0xff141b25) : (isMouseOver? juce::Colour(0xff1b222c): juce::Colour(0xff1d2633));
         juce::Colour bot = juce::Colour(0xff0a0d12);
         juce::ColourGradient grad(top,face.getX(),face.getY(),bot,face.getX(),face.getBottom(),false);
         g.setGradientFill(grad); g.fillRoundedRectangle(face,corner);
@@ -222,8 +222,8 @@ public:
     void paintButton(juce::Graphics& g, bool isMouseOver, bool) override {
         auto r=getLocalBounds().toFloat();
         juce::Colour amber(0xffff9a3f);
-        g.setColour(on?amber:juce::Colour(0xff101419)); g.fillRoundedRectangle(r,8.f);
-        g.setColour(on?amber:(isMouseOver?juce::Colour(0xff3a4148):juce::Colour(0xff242a31))); g.drawRoundedRectangle(r.reduced(0.75f),8.f,1.f);
+        g.setColour(on?amber:juce::Colour(0xff141b25)); g.fillRoundedRectangle(r,8.f);
+        g.setColour(on?amber:(isMouseOver?juce::Colour(0xff3a4148):juce::Colour(0xff313942))); g.drawRoundedRectangle(r.reduced(0.75f),8.f,1.f);
         float iconR=7.f, cx=r.getX()+22.f, cy=r.getCentreY();
         juce::Colour iconColour = on ? juce::Colours::black : juce::Colour(0xff737e89);
         juce::Path arc; arc.addCentredArc(cx,cy,iconR,iconR,0.f,juce::MathConstants<float>::pi*0.22f,juce::MathConstants<float>::pi*1.78f,true);
