@@ -848,15 +848,13 @@ void PQContentComponent::paint(juce::Graphics&g){
  label(g,"20 Hz",{chart.getX(),chart.getBottom()-18,60,18},muted());label(g,"1 kHz",{chart.getCentreX()-25,chart.getBottom()-18,50,18},muted());label(g,"20 kHz",{chart.getRight()-60,chart.getBottom()-18,60,18},muted());
  label(g,"CLICK: ADD BAND   RIGHT-CLICK: TYPE+TARGET/DELETE   DRAG: FREQ+GAIN   SCROLL: Q   DEL: REMOVE SELECTED",{chart.getX(),chart.getY()-16,700,14},muted());
  {
-     // FIX (compact Mono Maker + panel height, per feedback): the panel used to be sized to fit a
-     // tall Mono Maker box (204px) that had far more empty space in it than its actual content
-     // (label+fader+value) needed - and every OTHER zone was then forced to sit inside that same
-     // oversized panel, leaving visible dead space below their own (much shorter) content. Both
-     // numbers below are now sized to what Mono Maker actually needs, and the panel height is
-     // derived directly from that instead of a separate guessed constant.
-     const float monoBoxX=42.f, monoBoxW=150.f, monoBoxH=150.f;
-     const float ctrlPanelH=10.f+monoBoxH+14.f+30.f+20.f; // top pad + box + gap + button row + bottom pad
-     auto ctrlPanel=juce::Rectangle<float>(24.f,chart.getBottom()+32.f,a.getWidth()-48.f,ctrlPanelH);
+     // FIX (final layout pass, per detailed spec): panel's TOP stays exactly where it was, but its
+     // BOTTOM now extends almost all the way to the window's own bottom edge (leaving just a few px
+     // of page background) instead of being sized to barely fit its content. Mono Maker also shrinks
+     // significantly narrower, and every row inside gets noticeably more vertical breathing room -
+     // the panel was reading as a cramped strip glued under the analyzer; this is what fixes that.
+     const float monoBoxX=83.f, monoBoxW=84.f, monoBoxH=175.f;
+     auto ctrlPanel=juce::Rectangle<float>(24.f, chart.getBottom()+32.f, a.getWidth()-48.f, (a.getHeight()-8.f)-(chart.getBottom()+32.f));
      // FIX (was a bump, corrected to a step): the previous version rose up and immediately came back
      // down (a small hill in the middle of a flat line). What's wanted is a permanent TWO-LEVEL STEP:
      // deep (full height) under Mono Maker/the action buttons on the left, shallow (shorter) for the
@@ -865,7 +863,7 @@ void PQContentComponent::paint(juce::Graphics&g){
      juce::Path panelPath;
      {
          constexpr float pi=juce::MathConstants<float>::pi;
-         const float cornerR=16.f;
+         const float cornerR=18.f;
          const float stepRise=16.f;                           // how much shallower the right (everything past Mono Maker) is
          const float seamX=monoBoxX+monoBoxW+110.f;           // comfortably past CLEAR's right edge
          const float transitionWidth=80.f;                    // short and localized, not a long gradual slope
@@ -895,7 +893,7 @@ void PQContentComponent::paint(juce::Graphics&g){
      // around the button row, fading outward - clipped to the panel's actual (now carved) silhouette
      // so it never spills past the real edge. Purely decorative, sits behind the actual buttons.
      {
-         float btnCenterY=chart.getBottom()+42.f+monoBoxH+14.f+15.f; // vertical middle of the button row
+         float btnCenterY=chart.getBottom()+42.f+monoBoxH+21.f+15.f; // vertical middle of the button row
          float btnCenterX=monoBoxX+80.f;
          g.saveState(); g.reduceClipRegion(panelPath);
          juce::ColourGradient spotlight(juce::Colour(0xff69a1d0).withAlpha(0.09f),btnCenterX,btnCenterY,
@@ -908,7 +906,7 @@ void PQContentComponent::paint(juce::Graphics&g){
  // (matching the reference exactly) - everything else reorganizes into four bordered zones (MATCH
  // AMOUNT / FREQUENCY RANGE / STEREOIZATION / WIDTH AMT) with thin divider lines between them and
  // accent-coloured headers, instead of the previous two wide, loosely-related columns.
- const float monoBoxX=42.f, monoBoxW=150.f, monoBoxH=150.f, panelGap=24.f;
+ const float monoBoxX=83.f, monoBoxW=84.f, monoBoxH=175.f, panelGap=48.f;
  const float panelX=monoBoxX+monoBoxW+panelGap;
  const float panelRight=a.getWidth()-42.f;
  // FIX (requested - eliminates wasted space on the right): FREQUENCY RANGE/STEREOIZATION/WIDTH AMT
@@ -923,21 +921,24 @@ void PQContentComponent::paint(juce::Graphics&g){
  const float zone1X=panelX, zone2X=zone1X+zone1W+zoneGap, zone3X=zone2X+zone2W+zoneGap, zone4X=zone3X+zone3W+zoneGap;
  const float sliderIndent=75.f; // room for the row label before the slider starts, within zone1
  const float matchSliderW=zone1W-sliderIndent-8.f;
- int y=(int)chart.getBottom()+70;
+ // FIX (per spec - vertical rhythm): controls were sitting too high, cramped near the panel's top
+ // edge. Header moved down (+30px) and row spacing widened (44px vs 38px) so the now much-taller
+ // panel actually reads as spacious rather than the same cramped content just floating in more space.
+ int y=(int)chart.getBottom()+112;
  const juce::Colour& accentHi = accentHighlight(); // local alias, avoids shadowing the global accent() (base accent, different colour)
- label(g,"MATCH AMOUNT",{zone1X,chart.getBottom()+47,150,18},accentHi);
- label(g,"FREQUENCY RANGE",{zone2X,chart.getBottom()+47,180,18},accentHi);
- label(g,"STEREOIZATION",{zone3X,chart.getBottom()+47,180,18},accentHi);
- // Thin divider lines between zones, matching the reference's separated-columns look. Bottom now
- // tracks Mono Maker's (shorter) box height instead of a leftover taller constant.
- g.setColour(grid());
+ label(g,"MATCH AMOUNT",{zone1X,chart.getBottom()+77,150,18},accentHi);
+ label(g,"FREQUENCY RANGE",{zone2X,chart.getBottom()+77,180,18},accentHi);
+ label(g,"STEREOIZATION",{zone3X,chart.getBottom()+77,180,18},accentHi);
+ // Thin divider lines between zones - now stop well before the button row (per spec), and at a low
+ // opacity (30-40%) rather than full strength.
+ g.setColour(grid().withAlpha(0.35f));
  for(float dx:{zone1X+zone1W+zoneGap*0.5f, zone2X+zone2W+zoneGap*0.5f, zone3X+zone3W+zoneGap*0.5f})
-     g.drawLine(dx,chart.getBottom()+44.f,dx,chart.getBottom()+42.f+monoBoxH,1.f);
+     g.drawLine(dx,chart.getBottom()+74.f,dx,chart.getBottom()+42.f+monoBoxH,1.f);
  const float matchSliderX=zone1X+sliderIndent;
- label(g,"STEREO",{zone1X+3,(float)y+2,80,18},white()); label(g,"MID",{zone1X+3,(float)y+38,80,18},yellow()); label(g,"SIDE",{zone1X+3,(float)y+74,80,18},blue());
- label(g,"LOW HZ",{zone2X,(float)y+2,100,18},muted()); label(g,"HIGH HZ",{zone2X,(float)y+44,100,18},muted());
- label(g,"MODE",{zone3X,(float)y+2,100,18},muted()); label(g,"STAGE",{zone3X,(float)y+44,100,18},muted());
- label(g,"WIDTH AMT",{zone4X,(float)y+2,100,18},muted()); label(g,"DEPTH %",{zone4X,(float)y+44,100,18},muted());
+ label(g,"STEREO",{zone1X+3,(float)y+2,80,18},white()); label(g,"MID",{zone1X+3,(float)y+45,80,18},yellow()); label(g,"SIDE",{zone1X+3,(float)y+88,80,18},blue());
+ label(g,"LOW HZ",{zone2X,(float)y+2,100,18},muted()); label(g,"HIGH HZ",{zone2X,(float)y+47,100,18},muted());
+ label(g,"MODE",{zone3X,(float)y+2,100,18},muted()); label(g,"STAGE",{zone3X,(float)y+47,100,18},muted());
+ label(g,"WIDTH AMT",{zone4X,(float)y+2,100,18},muted()); label(g,"DEPTH %",{zone4X,(float)y+47,100,18},muted());
  // Mono Maker's own vertical module, far left - separated from the main tray by DEPTH (its own
  // slightly lighter surface tone, a stronger shadow beneath it, and a faint top highlight), not by a
  // bright colour outline. #2E7CC2/blueLight() belongs to SIDE and active controls, not to this
@@ -1042,10 +1043,10 @@ void PQContentComponent::resized(){auto a=getLocalBounds();
  auto meterPanel=chartFull.removeFromRight(180.f);
  chartFull.removeFromRight(16.f);
  auto chart=chartFull;
- int y=chart.getBottom()+70;
- // FIX (layout, per reference mockup - matches paint()): Mono Maker's own (now compact) box on the
- // far left, four bordered zones (MATCH AMOUNT/FREQUENCY RANGE/STEREOIZATION/WIDTH AMT) to its right.
- const float monoBoxX=42.f, monoBoxW=150.f, monoBoxH=150.f, panelGap=24.f;
+ int y=chart.getBottom()+112;
+ // FIX (final layout pass, per detailed spec - matches paint()): Mono Maker much narrower, panel
+ // extends near the window bottom, everything gets more vertical breathing room.
+ const float monoBoxX=83.f, monoBoxW=84.f, monoBoxH=175.f, panelGap=48.f;
  const float panelX=monoBoxX+monoBoxW+panelGap;
  const float panelRight=(float)a.getWidth()-42.f;
  // FIX (matches paint()): MATCH AMOUNT absorbs all leftover width, eliminating the wasted space.
@@ -1059,11 +1060,11 @@ void PQContentComponent::resized(){auto a=getLocalBounds();
  const float matchSliderW=zone1W-sliderIndent-8.f;
  const float matchSliderX=zone1X+sliderIndent;
  const float zone2CtrlW=zone2W-8.f, zone3CtrlW=zone3W-8.f, zone4CtrlW=zone4W-8.f;
- sAmt.setBounds((int)matchSliderX,y,(int)matchSliderW,22);mAmt.setBounds((int)matchSliderX,y+38,(int)matchSliderW,22);siAmt.setBounds((int)matchSliderX,y+74,(int)matchSliderW,22);
- low.setBounds((int)zone2X,y+18,(int)zone2CtrlW,22);high.setBounds((int)zone2X,y+60,(int)zone2CtrlW,22);
- // Mono Maker: vertical fader inside its own (now compact) box - 100px of actual track + 20px for
+ sAmt.setBounds((int)matchSliderX,y,(int)matchSliderW,22);mAmt.setBounds((int)matchSliderX,y+45,(int)matchSliderW,22);siAmt.setBounds((int)matchSliderX,y+88,(int)matchSliderW,22);
+ low.setBounds((int)zone2X,y+18,(int)zone2CtrlW,22);high.setBounds((int)zone2X,y+63,(int)zone2CtrlW,22);
+ // Mono Maker: vertical fader inside its own (now taller) box - 110px of actual track + 20px for
  // the built-in TextBoxBelow value readout, starting right under the "MONO MAKER" header.
- monoMaker.setBounds((int)(monoBoxX+(monoBoxW-50.f)/2.f),(int)chart.getBottom()+76,50,100);
+ monoMaker.setBounds((int)(monoBoxX+(monoBoxW-50.f)/2.f),(int)chart.getBottom()+76,50,130);
  // FIX (two-rail meter groups, per reference - matches paint()): each side is now a thin trim rail
  // (just the fader dot) next to a separate, slightly wider level rail (the glowing fill bar), instead
  // of both overlaid on the same rect.
@@ -1083,10 +1084,11 @@ void PQContentComponent::resized(){auto a=getLocalBounds();
      inputTrim.setBounds(inTrimRail.toNearestInt()); outputTrim.setBounds(outTrimRail.toNearestInt());
      matchGainBtn.setBounds(btnRow.toNearestInt());
  }
- mode.setBounds((int)zone3X,y+18,(int)zone3CtrlW,25);widthStage.setBounds((int)zone3X,y+60,(int)zone3CtrlW,25);
- width.setBounds((int)zone4X,y+18,(int)zone4CtrlW,25);depth.setBounds((int)zone4X,y+60,(int)zone4CtrlW,25);
- // Buttons now sit directly under the (now compact) Mono Maker box, matching the reference's layout.
- const int btnY=(int)chart.getBottom()+42+(int)monoBoxH+14;
+ mode.setBounds((int)zone3X,y+18,(int)zone3CtrlW,25);widthStage.setBounds((int)zone3X,y+63,(int)zone3CtrlW,25);
+ width.setBounds((int)zone4X,y+18,(int)zone4CtrlW,25);depth.setBounds((int)zone4X,y+63,(int)zone4CtrlW,25);
+ // Buttons now sit near the bottom of the (now much taller) panel, per spec - well below Mono Maker
+ // rather than immediately under it.
+ const int btnY=(int)chart.getBottom()+42+(int)monoBoxH+21;
  capture.setBounds((int)monoBoxX,btnY,68,30);apply.setBounds((int)monoBoxX+74,btnY,62,30);clear.setBounds((int)monoBoxX+142,btnY,58,30);
  status.setBounds((int)zone1X,btnY,300,30);
  // FIX (preset restructure): overlay now anchored under the preset list/kebab on the LEFT, where
