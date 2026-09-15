@@ -132,7 +132,7 @@ void PresetPanel::resized(){
     importMatchBtn.setBounds(matchRow);
 }
 
-PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcessorEditor(&x),p(x),presetPanel(x,presetList){setResizable(true,true);setSize(1320,760);
+PQContentComponent::PQContentComponent(PQAudioProcessor&x):p(x),presetPanel(x,presetList){setSize(1320,760);
  setWantsKeyboardFocus(true); // FIX (item 4): needed so this component (not a child control) receives Delete/Backspace
  for(auto*t:{&stereo,&mid,&side}) addAndMakeVisible(*t);
  stereo.setDotColour(white()); mid.setDotColour(yellow()); side.setDotColour(blue());
@@ -264,7 +264,7 @@ PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcesso
 
  addAndMakeVisible(mode);addAndMakeVisible(status);status.setColour(juce::Label::textColourId,muted());status.setJustificationType(juce::Justification::centredRight);startTimerHz(20);
 }
-PQAudioProcessorEditor::~PQAudioProcessorEditor(){
+PQContentComponent::~PQContentComponent(){
     for(auto*s:{&sAmt,&mAmt,&siAmt,&low,&high,&width,&depth,&monoMaker}) s->setLookAndFeel(nullptr);
     setLookAndFeel(nullptr);
 }
@@ -272,7 +272,7 @@ PQAudioProcessorEditor::~PQAudioProcessorEditor(){
 // I1: reflect the background averaging capture (see PQAudioProcessor::captureReference/
 // analyzeAndUpdate) on the CAPTURE button itself - disabled + showing live progress while it runs,
 // so a second click can't restart/confuse an in-progress capture.
-void PQAudioProcessorEditor::timerCallback(){
+void PQContentComponent::timerCallback(){
     bool capturing=p.capturingReference.load();
     if(capturing){
         capture.setEnabled(false);
@@ -289,7 +289,7 @@ void PQAudioProcessorEditor::timerCallback(){
 // FIX (item 6): after a preset load, far more than just the reference curve may have changed
 // (manual EQ is read straight from the processor every paint, but the plain juce::Slider/ComboBox
 // controls below the chart cache their own value and need to be told explicitly).
-void PQAudioProcessorEditor::syncControlsFromProcessor(){
+void PQContentComponent::syncControlsFromProcessor(){
  sAmt.setValue(p.stereoMatch.load()/kMatchAmountCap*100.f,juce::dontSendNotification);
  mAmt.setValue(p.midMatch.load()/kMatchAmountCap*100.f,juce::dontSendNotification);
  siAmt.setValue(p.sideMatch.load()/kMatchAmountCap*100.f,juce::dontSendNotification);
@@ -309,12 +309,12 @@ void PQAudioProcessorEditor::syncControlsFromProcessor(){
 // See header: the toggle that was most recently switched ON is where new manual-EQ nodes go.
 // Several toggles can be on together (each keeps showing/editing its own curve); only the stack
 // order changes which one is "armed" for the very next added node.
-void PQAudioProcessorEditor::updateActiveTargetStack(PQAudioProcessor::ManualTarget t, bool on){
+void PQContentComponent::updateActiveTargetStack(PQAudioProcessor::ManualTarget t, bool on){
     activeManualTargets.removeAllInstancesOf(t);
     if(on) activeManualTargets.add(t);
 }
 
-void PQAudioProcessorEditor::refreshBandButtons(){
+void PQContentComponent::refreshBandButtons(){
  stereo.setToggleState(p.stereoOn.load(),juce::dontSendNotification); stereo.repaint();
  mid.setToggleState(p.midOn.load(),juce::dontSendNotification); mid.repaint();
  side.setToggleState(p.sideOn.load(),juce::dontSendNotification); side.repaint();
@@ -322,18 +322,18 @@ void PQAudioProcessorEditor::refreshBandButtons(){
 // Bypass reads as muted grey with a hollow power icon when off, and switches to a solid amber fill
 // with a filled black icon when engaged - unmistakable at a glance, the way a hardware bypass
 // switch's LED would be. See BypassButton::paintButton for the actual drawing.
-void PQAudioProcessorEditor::refreshBypassButton(){
+void PQContentComponent::refreshBypassButton(){
  bypass.setOn(p.bypassed.load());
 }
 
-void PQAudioProcessorEditor::setupButton(juce::TextButton&b,juce::Colour c){addAndMakeVisible(b);b.setColour(juce::TextButton::buttonColourId,panel());b.setColour(juce::TextButton::buttonOnColourId,grid());b.setColour(juce::TextButton::textColourOffId,c);b.setColour(juce::TextButton::textColourOnId,c);}
-void PQAudioProcessorEditor::setupSlider(juce::Slider&s,double a,double b,double step){addAndMakeVisible(s);s.setSliderStyle(juce::Slider::LinearHorizontal);s.setTextBoxStyle(juce::Slider::TextBoxRight,false,66,20);s.setRange(a,b,step);s.setColour(juce::Slider::thumbColourId,white());s.setColour(juce::Slider::trackColourId,grid());s.setColour(juce::Slider::textBoxTextColourId,white());s.setColour(juce::Slider::textBoxBackgroundColourId,panel());}
+void PQContentComponent::setupButton(juce::TextButton&b,juce::Colour c){addAndMakeVisible(b);b.setColour(juce::TextButton::buttonColourId,panel());b.setColour(juce::TextButton::buttonOnColourId,grid());b.setColour(juce::TextButton::textColourOffId,c);b.setColour(juce::TextButton::textColourOnId,c);}
+void PQContentComponent::setupSlider(juce::Slider&s,double a,double b,double step){addAndMakeVisible(s);s.setSliderStyle(juce::Slider::LinearHorizontal);s.setTextBoxStyle(juce::Slider::TextBoxRight,false,66,20);s.setRange(a,b,step);s.setColour(juce::Slider::thumbColourId,white());s.setColour(juce::Slider::trackColourId,grid());s.setColour(juce::Slider::textBoxTextColourId,white());s.setColour(juce::Slider::textBoxBackgroundColourId,panel());}
 // Thin vertical trim fader meant to sit directly on top of drawVerticalMeter() for the same
 // rectangle: no text box, transparent track (the meter bar underneath already reads as the track),
 // a slim pale marker for the thumb - just enough to find and drag, without reading as its own
 // separate control competing with the level bar for attention.
-void PQAudioProcessorEditor::setupVerticalTrim(juce::Slider&s){addAndMakeVisible(s);s.setSliderStyle(juce::Slider::LinearVertical);s.setTextBoxStyle(juce::Slider::NoTextBox,false,0,0);s.setColour(juce::Slider::thumbColourId,juce::Colours::white.withAlpha(0.55f));s.setColour(juce::Slider::trackColourId,juce::Colours::transparentBlack);s.setColour(juce::Slider::backgroundColourId,juce::Colours::transparentBlack);}
-void PQAudioProcessorEditor::label(juce::Graphics&g,juce::String t,juce::Rectangle<float>r,juce::Colour c){g.setColour(c);g.setFont(juce::FontOptions(10));g.drawText(t,r,juce::Justification::left);}
+void PQContentComponent::setupVerticalTrim(juce::Slider&s){addAndMakeVisible(s);s.setSliderStyle(juce::Slider::LinearVertical);s.setTextBoxStyle(juce::Slider::NoTextBox,false,0,0);s.setColour(juce::Slider::thumbColourId,juce::Colours::white.withAlpha(0.55f));s.setColour(juce::Slider::trackColourId,juce::Colours::transparentBlack);s.setColour(juce::Slider::backgroundColourId,juce::Colours::transparentBlack);}
+void PQContentComponent::label(juce::Graphics&g,juce::String t,juce::Rectangle<float>r,juce::Colour c){g.setColour(c);g.setFont(juce::FontOptions(10));g.drawText(t,r,juce::Justification::left);}
 namespace {
 // FIX (low-end still looked steppy after the FFT/averaging fixes): the path used to connect raw
 // points with straight lines, which draws every remaining quantization step as a visible corner.
@@ -363,7 +363,7 @@ void glowUnder(juce::Graphics& g, const juce::Path& lineOnly, float bottom, floa
     g.fillPath(fillPath);
 }
 }
-void PQAudioProcessorEditor::drawCurve(juce::Graphics&g,juce::Rectangle<float>r,const std::array<std::atomic<float>,PQAudioProcessor::kBins>&a,juce::Colour c){
+void PQContentComponent::drawCurve(juce::Graphics&g,juce::Rectangle<float>r,const std::array<std::atomic<float>,PQAudioProcessor::kBins>&a,juce::Colour c){
  juce::Path q; juce::Point<float> prev;
  for(int i=0;i<PQAudioProcessor::kBins;i++){
      float x=r.getX()+r.getWidth()*i/(PQAudioProcessor::kBins-1.f),db=a[i].load(),y=r.getBottom()-r.getHeight()*juce::jlimit(0.f,1.f,(db+90)/96.f);
@@ -384,7 +384,7 @@ void PQAudioProcessorEditor::drawCurve(juce::Graphics&g,juce::Rectangle<float>r,
  glowUnder(g,q,r.getBottom(),r.getX(),r.getRight(),c,0.16f);
  g.setColour(c);g.strokePath(q,juce::PathStrokeType(1.8f));
 }
-void PQAudioProcessorEditor::drawRef(juce::Graphics&g,juce::Rectangle<float>r,const std::array<std::atomic<float>,PQAudioProcessor::kBins>&a,juce::Colour c){
+void PQContentComponent::drawRef(juce::Graphics&g,juce::Rectangle<float>r,const std::array<std::atomic<float>,PQAudioProcessor::kBins>&a,juce::Colour c){
  juce::Path q; juce::Point<float> prev;
  for(int i=0;i<PQAudioProcessor::kBins;i++){
      float x=r.getX()+r.getWidth()*i/(PQAudioProcessor::kBins-1.f),db=a[i].load(),y=r.getBottom()-r.getHeight()*juce::jlimit(0.f,1.f,(db+90)/96.f);
@@ -402,7 +402,7 @@ void PQAudioProcessorEditor::drawRef(juce::Graphics&g,juce::Rectangle<float>r,co
 // nodes are doing. Points are placed at the kBands correction-band centre frequencies
 // (PQAudioProcessor::bandHz), not the kBins analyzer resolution - there are far fewer of them, so
 // the curve is naturally smooth without needing the analyzer's own smoothing pass.
-void PQAudioProcessorEditor::drawDeltaCurve(juce::Graphics& g, const std::array<std::atomic<float>,PQAudioProcessor::kBands>& corr, juce::Colour c){
+void PQContentComponent::drawDeltaCurve(juce::Graphics& g, const std::array<std::atomic<float>,PQAudioProcessor::kBands>& corr, juce::Colour c){
     juce::Path q;
     for(int i=0;i<PQAudioProcessor::kBands;++i){
         float t=i/float(PQAudioProcessor::kBands-1);
@@ -418,7 +418,7 @@ void PQAudioProcessorEditor::drawDeltaCurve(juce::Graphics& g, const std::array<
 // New: shades the parts of the analyzer that fall outside the current Low/High Hz match range,
 // so the frequency-range sliders now have a visible effect on the chart itself (this was
 // previously invisible - the range only affected the DSP, not what you could see).
-void PQAudioProcessorEditor::drawRangeMask(juce::Graphics&g,juce::Rectangle<float>r){
+void PQContentComponent::drawRangeMask(juce::Graphics&g,juce::Rectangle<float>r){
  auto xForHz=[&](float hz){ float t=(std::log10(juce::jlimit(20.f,20000.f,hz))-std::log10(20.f))/(std::log10(20000.f)-std::log10(20.f)); return r.getX()+r.getWidth()*t; };
  float lo=p.lowHz.load(), hi=p.highHz.load();
  float xLo=xForHz(lo), xHi=xForHz(hi);
@@ -436,7 +436,7 @@ void PQAudioProcessorEditor::drawRangeMask(juce::Graphics&g,juce::Rectangle<floa
 // below the bar (see paint()) gives the precise reading they were trying to provide. The flat fill
 // is replaced with a soft vertical gradient (dim at the bottom, full colour at the top) so the bar
 // itself looks less like a flat block and more like a proper level meter.
-void PQAudioProcessorEditor::drawVerticalMeter(juce::Graphics&g,juce::Rectangle<float>r,float levelDb,float peakDb,juce::Colour c){
+void PQContentComponent::drawVerticalMeter(juce::Graphics&g,juce::Rectangle<float>r,float levelDb,float peakDb,juce::Colour c){
  g.setColour(panel()); g.fillRoundedRectangle(r,5.f);
  g.setColour(grid()); g.drawRoundedRectangle(r,5.f,1.f);
  constexpr float kFloorDb=-60.f;
@@ -467,7 +467,7 @@ void PQAudioProcessorEditor::drawVerticalMeter(juce::Graphics&g,juce::Rectangle<
  g.fillRect(juce::Rectangle<float>(fillR.getX(),py-0.75f,fillR.getWidth(),1.5f));
 }
 
-void PQAudioProcessorEditor::drawFreqDbAxis(juce::Graphics& g, juce::Rectangle<float> chart){
+void PQContentComponent::drawFreqDbAxis(juce::Graphics& g, juce::Rectangle<float> chart){
  // Horizontal dB gridlines + numeric labels, tied to the same +/-kManualGainRangeDb coordinate
  // system the manual EQ nodes use (gainDbToY), so the axis actually matches what dragging a node
  // does to the chart.
@@ -492,12 +492,12 @@ void PQAudioProcessorEditor::drawFreqDbAxis(juce::Graphics& g, juce::Rectangle<f
 }
 
 // ---- Manual EQ chart geometry -------------------------------------------------------------
-float PQAudioProcessorEditor::xToFreq(float x) const{ float t=juce::jlimit(0.f,1.f,(x-chartArea.getX())/chartArea.getWidth()); return std::pow(10.f, std::log10(20.f)+t*(std::log10(20000.f)-std::log10(20.f))); }
-float PQAudioProcessorEditor::freqToX(float hz) const{ float t=(std::log10(juce::jlimit(20.f,20000.f,hz))-std::log10(20.f))/(std::log10(20000.f)-std::log10(20.f)); return chartArea.getX()+chartArea.getWidth()*t; }
-float PQAudioProcessorEditor::yToGainDb(float y) const{ float t=juce::jlimit(0.f,1.f,(y-chartArea.getY())/chartArea.getHeight()); return juce::jmap(t,0.f,1.f,kManualGainRangeDb,-kManualGainRangeDb); }
-float PQAudioProcessorEditor::gainDbToY(float gainDb) const{ float t=juce::jmap(juce::jlimit(-kManualGainRangeDb,kManualGainRangeDb,gainDb),kManualGainRangeDb,-kManualGainRangeDb,0.f,1.f); return chartArea.getY()+chartArea.getHeight()*t; }
+float PQContentComponent::xToFreq(float x) const{ float t=juce::jlimit(0.f,1.f,(x-chartArea.getX())/chartArea.getWidth()); return std::pow(10.f, std::log10(20.f)+t*(std::log10(20000.f)-std::log10(20.f))); }
+float PQContentComponent::freqToX(float hz) const{ float t=(std::log10(juce::jlimit(20.f,20000.f,hz))-std::log10(20.f))/(std::log10(20000.f)-std::log10(20.f)); return chartArea.getX()+chartArea.getWidth()*t; }
+float PQContentComponent::yToGainDb(float y) const{ float t=juce::jlimit(0.f,1.f,(y-chartArea.getY())/chartArea.getHeight()); return juce::jmap(t,0.f,1.f,kManualGainRangeDb,-kManualGainRangeDb); }
+float PQContentComponent::gainDbToY(float gainDb) const{ float t=juce::jmap(juce::jlimit(-kManualGainRangeDb,kManualGainRangeDb,gainDb),kManualGainRangeDb,-kManualGainRangeDb,0.f,1.f); return chartArea.getY()+chartArea.getHeight()*t; }
 
-int PQAudioProcessorEditor::findBandNear(juce::Point<float> pos) const{
+int PQContentComponent::findBandNear(juce::Point<float> pos) const{
     constexpr float grabRadius=14.f; int best=-1; float bestDist=grabRadius;
     using MT=PQAudioProcessor::ManualTarget;
     for(int i=0;i<PQAudioProcessor::kMaxManualBands;++i){
@@ -514,13 +514,13 @@ int PQAudioProcessorEditor::findBandNear(juce::Point<float> pos) const{
     return best;
 }
 
-juce::String PQAudioProcessorEditor::manualTypeLabel(PQAudioProcessor::ManualType t){
+juce::String PQContentComponent::manualTypeLabel(PQAudioProcessor::ManualType t){
     using T=PQAudioProcessor::ManualType;
     switch(t){ case T::Bell:return "BELL"; case T::LowShelf:return "LOW SHELF"; case T::HighShelf:return "HIGH SHELF"; case T::LowCut:return "LOW CUT"; case T::HighCut:return "HIGH CUT"; case T::Notch:return "NOTCH"; }
     return {};
 }
 
-void PQAudioProcessorEditor::drawManualEq(juce::Graphics& g){
+void PQContentComponent::drawManualEq(juce::Graphics& g){
     using T=PQAudioProcessor::ManualType; using MT=PQAudioProcessor::ManualTarget;
     // FIX (item 1): a 0dB reference line is always visible, even with zero active bands, so the
     // chart never looks "empty/broken" the moment it's opened.
@@ -600,7 +600,7 @@ void PQAudioProcessorEditor::drawManualEq(juce::Graphics& g){
     }
 }
 
-void PQAudioProcessorEditor::mouseDown(const juce::MouseEvent& e){
+void PQContentComponent::mouseDown(const juce::MouseEvent& e){
     grabKeyboardFocus(); // FIX (item 4): so a subsequent Delete/Backspace reaches keyPressed() below
     if(!chartArea.contains(e.position)){ draggingBand=-1; selectedBand=-1; return; }
     int hit=findBandNear(e.position);
@@ -622,7 +622,7 @@ void PQAudioProcessorEditor::mouseDown(const juce::MouseEvent& e){
     }
     draggingBand=hit; selectedBand=hit; draggedPastThreshold=false; mouseDownPos=e.position;
 }
-void PQAudioProcessorEditor::mouseDrag(const juce::MouseEvent& e){
+void PQContentComponent::mouseDrag(const juce::MouseEvent& e){
     if(draggingBand<0) return;
     if(!draggedPastThreshold && e.position.getDistanceFrom(mouseDownPos)<2.0f) return;
     draggedPastThreshold=true;
@@ -630,12 +630,12 @@ void PQAudioProcessorEditor::mouseDrag(const juce::MouseEvent& e){
     p.setManualBandFreqGain(draggingBand, hz, gainDb);
     repaint();
 }
-void PQAudioProcessorEditor::mouseUp(const juce::MouseEvent&){ draggingBand=-1; draggedPastThreshold=false; }
-void PQAudioProcessorEditor::mouseDoubleClick(const juce::MouseEvent&){
+void PQContentComponent::mouseUp(const juce::MouseEvent&){ draggingBand=-1; draggedPastThreshold=false; }
+void PQContentComponent::mouseDoubleClick(const juce::MouseEvent&){
     // FIX (item 1): node creation now happens on the initial mouseDown (see above), so
     // double-click no longer has any separate add/delete/merge behaviour of its own.
 }
-void PQAudioProcessorEditor::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& w){
+void PQContentComponent::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& w){
     if(!chartArea.contains(e.position)) return;
     int hit=findBandNear(e.position); if(hit<0) return;
     using T=PQAudioProcessor::ManualType;
@@ -659,7 +659,7 @@ void PQAudioProcessorEditor::mouseWheelMove(const juce::MouseEvent& e, const juc
 }
 // FIX (item 4): Delete/Backspace removes the currently selected manual-EQ node (see mouseDown,
 // which sets selectedBand on every left- or right-click that hits an existing node).
-bool PQAudioProcessorEditor::keyPressed(const juce::KeyPress& k){
+bool PQContentComponent::keyPressed(const juce::KeyPress& k){
     // Space = toggle Bypass, the way most host transports/plugins treat it - skipped while a text
     // editor (e.g. the preset name box) has focus, so typing a space in a preset name still works.
     if(k==juce::KeyPress::spaceKey && dynamic_cast<juce::TextEditor*>(juce::Component::getCurrentlyFocusedComponent())==nullptr){
@@ -674,7 +674,7 @@ bool PQAudioProcessorEditor::keyPressed(const juce::KeyPress& k){
     }
     return false;
 }
-void PQAudioProcessorEditor::showBandTypeMenu(int bandIndex, juce::Point<int> screenPos){
+void PQContentComponent::showBandTypeMenu(int bandIndex, juce::Point<int> screenPos){
     using T=PQAudioProcessor::ManualType;
     // FIX (target now owned by the top toggles, not this menu): a node's Stereo/Mid/Side target used
     // to be changeable here via a "Move To" submenu. That's now redundant and removed - which target
@@ -691,7 +691,7 @@ void PQAudioProcessorEditor::showBandTypeMenu(int bandIndex, juce::Point<int> sc
         p.setManualBandType(bandIndex, types[result-1]); repaint();
     });
 }
-void PQAudioProcessorEditor::showAddBandMenu(juce::Point<float> chartPos, juce::Point<int> screenPos){
+void PQContentComponent::showAddBandMenu(juce::Point<float> chartPos, juce::Point<int> screenPos){
     using T=PQAudioProcessor::ManualType;
     // FIX (target now owned by the top toggles): right-click-on-empty-chart used to ask for
     // Target (Stereo/Mid/Side) as well as filter Type, via one submenu per target. Target selection
@@ -712,7 +712,7 @@ void PQAudioProcessorEditor::showAddBandMenu(juce::Point<float> chartPos, juce::
     });
 }
 
-void PQAudioProcessorEditor::paint(juce::Graphics&g){
+void PQContentComponent::paint(juce::Graphics&g){
  // FIX ("still looks the same" feedback): the previous gradient was too subtle to register as a
  // change at all. Pushed the contrast much further - a noticeably lighter cool navy at the top,
  // fading to near-black - plus a soft radial glow seated behind the chart (like a light source),
@@ -812,6 +812,14 @@ void PQAudioProcessorEditor::paint(juce::Graphics&g){
  label(g,"STEREO",{leftColX+3,(float)y+2,80,18},white()); label(g,"MID",{leftColX+3,(float)y+44,80,18},yellow()); label(g,"SIDE",{leftColX+3,(float)y+86,80,18},blue());
  // Mono Maker sits right under the match-amount sliders, in the space that column otherwise left
  // empty - both fixes the layout balance and gives the column a genuine second purpose.
+ // FIX (requested): Mono Maker looked identical to the three match-amount sliders above it, with
+ // nothing to mark it as a different kind of control. A thin rounded frame around its row (label +
+ // slider) sets it apart visually without needing a whole separate section header.
+ {
+     juce::Rectangle<float> monoFrame(leftColX-6.f,(float)y+124.f,maxMatchSliderW+sliderIndent+6.f,42.f);
+     g.setColour(juce::Colour(0xffbfe0ff).withAlpha(0.35f));
+     g.drawRoundedRectangle(monoFrame,8.f,1.2f);
+ }
  label(g,"MONO MAKER",{leftColX+3,(float)y+128,110,18},juce::Colour(0xffbfe0ff));
  label(g,"LOW HZ",{rightColX,(float)y+2,100,18},muted()); label(g,"HIGH HZ",{rightCol2X,(float)y+2,100,18},muted());
  // FIX (layout - your mockup): MODE/WIDTH/STAGE/DEPTH moved out of their old disconnected spot
@@ -847,7 +855,7 @@ void PQAudioProcessorEditor::paint(juce::Graphics&g){
  // (below, in resized()) is self-explanatory whenever it actually has something to say (e.g. "PEAK
  // MATCHED"), and renders as nothing at all when empty.
 }
-void PQAudioProcessorEditor::resized(){auto a=getLocalBounds();
+void PQContentComponent::resized(){auto a=getLocalBounds();
  // FIX (preset restructure): the preset dropdown + kebab now live on the LEFT of the header, right
  // after the PQ/title text - matching where a "Default v" preset picker normally sits, and well
  // clear of the STEREO/MID/SIDE cluster which stays anchored to the right.
@@ -906,4 +914,29 @@ void PQAudioProcessorEditor::resized(){auto a=getLocalBounds();
  // those controls actually live - and shrunk (no more list row inside it) to just fit name/save/
  // delete. Still only visible while the kebab is toggled on.
  presetPanel.setBounds(540,60,300,190);
+}
+
+// ---- PQAudioProcessorEditor: thin top-level wrapper that scales PQContentComponent -------------
+PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor& proc)
+    : juce::AudioProcessorEditor(&proc), content(proc)
+{
+    addAndMakeVisible(content);
+    content.setBounds(0,0,kDesignW,kDesignH); // content's own fixed design-space bounds; never changes
+    // Real host-side resizing: allow roughly half the design size up to double it, in either
+    // dimension independently - resized() below re-fits the fixed-aspect content to whatever the
+    // host actually gives us, letterboxed if the aspect ratio doesn't match exactly.
+    setResizable(true,true);
+    setResizeLimits(kDesignW/2, kDesignH/2, kDesignW*2, kDesignH*2);
+    setSize(kDesignW,kDesignH); // 1:1 (scale = 1.0) on first open
+}
+void PQAudioProcessorEditor::resized(){
+    // Uniform scale (never stretched non-uniformly, which would distort the whole UI) that fits the
+    // fixed design canvas inside whatever size the host window actually is, then centers it - so
+    // resizing the plugin window scales everything together instead of any part of it ever being
+    // pushed outside the visible area or clipped off.
+    float scaleX=(float)getWidth()/(float)kDesignW, scaleY=(float)getHeight()/(float)kDesignH;
+    float scale=juce::jmin(scaleX,scaleY);
+    float offsetX=((float)getWidth()-(float)kDesignW*scale)*0.5f;
+    float offsetY=((float)getHeight()-(float)kDesignH*scale)*0.5f;
+    content.setTransform(juce::AffineTransform::scale(scale).translated(offsetX,offsetY));
 }
