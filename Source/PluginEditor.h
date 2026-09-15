@@ -131,6 +131,7 @@ public:
     void drawLinearSlider(juce::Graphics& g, int x, int y, int width, int height, float sliderPos,
                            float minSliderPos, float maxSliderPos,
                            const juce::Slider::SliderStyle style, juce::Slider& slider) override {
+        if(style==juce::Slider::SliderStyle::LinearVertical){ drawVertical(g,x,y,width,height,sliderPos); return; }
         if(style!=juce::Slider::SliderStyle::LinearHorizontal){
             juce::LookAndFeel_V4::drawLinearSlider(g,x,y,width,height,sliderPos,minSliderPos,maxSliderPos,style,slider);
             return;
@@ -155,6 +156,56 @@ public:
     }
 private:
     juce::Colour glowColour{juce::Colours::white};
+    // Vertical variant (added for Mono Maker): same idea rotated - track fills with a glow from the
+    // BOTTOM up to the thumb (0% = empty, 100% = fully lit), plus small flanking tick marks so it
+    // reads as a real fader scale rather than a bare line.
+    void drawVertical(juce::Graphics& g, int x, int y, int width, int height, float sliderPos){
+        float trackW=4.f, cx=(float)x+(float)width*0.5f;
+        float top=(float)y, bottom=(float)y+(float)height;
+        juce::Rectangle<float> full(cx-trackW*0.5f,top,trackW,bottom-top);
+        g.setColour(juce::Colour(0xff242a31)); g.fillRoundedRectangle(full,trackW*0.5f);
+        g.setColour(juce::Colours::white.withAlpha(0.18f));
+        for(int i=0;i<=4;++i){
+            float ty=top+(bottom-top)*(i/4.f);
+            g.fillRect(juce::Rectangle<float>(cx-14.f,ty-0.5f,8.f,1.f));
+            g.fillRect(juce::Rectangle<float>(cx+6.f,ty-0.5f,8.f,1.f));
+        }
+        float filledH=juce::jmax(0.f, bottom-sliderPos);
+        if(filledH>1.f){
+            juce::Rectangle<float> filled(cx-trackW*0.5f,sliderPos,trackW,filledH);
+            juce::Path filledPath; filledPath.addRoundedRectangle(filled,trackW*0.5f);
+            juce::DropShadow glow(glowColour.withAlpha(0.6f),10,juce::Point<int>(0,0));
+            glow.drawForPath(g,filledPath);
+            g.setColour(glowColour); g.fillRoundedRectangle(filled,trackW*0.5f);
+        }
+        float thumbR=8.f;
+        juce::Path thumbPath; thumbPath.addEllipse(cx-thumbR,sliderPos-thumbR,thumbR*2.f,thumbR*2.f);
+        juce::DropShadow thumbGlow(glowColour.withAlpha(0.85f),11,juce::Point<int>(0,0));
+        thumbGlow.drawForPath(g,thumbPath);
+        g.setColour(juce::Colours::white); g.fillEllipse(cx-thumbR,sliderPos-thumbR,thumbR*2.f,thumbR*2.f);
+        g.setColour(glowColour); g.drawEllipse(cx-thumbR,sliderPos-thumbR,thumbR*2.f,thumbR*2.f,1.5f);
+    }
+};
+
+// Console-style beveled button (per "console/hardware" request): a subtle raised look - lighter
+// gradient sheen along the top, a thin darker "base" edge along the bottom - instead of a flat rect.
+// Applied to CAPTURE/APPLY/CLEAR/STAGE so the bottom panel reads as having real physical depth.
+class ConsoleButtonLookAndFeel : public juce::LookAndFeel_V4 {
+public:
+    void drawButtonBackground(juce::Graphics& g, juce::Button& b, const juce::Colour&, bool isMouseOver, bool isDown) override {
+        auto r=b.getLocalBounds().toFloat();
+        float corner=8.f;
+        g.setColour(juce::Colours::black.withAlpha(0.5f));
+        g.fillRoundedRectangle(r.translated(0.f,2.f),corner);
+        auto face=r.withTrimmedBottom(2.f);
+        juce::Colour top = isDown? juce::Colour(0xff0c0f14) : (isMouseOver? juce::Colour(0xff1b222c): juce::Colour(0xff141a22));
+        juce::Colour bot = juce::Colour(0xff0a0d12);
+        juce::ColourGradient grad(top,face.getX(),face.getY(),bot,face.getX(),face.getBottom(),false);
+        g.setGradientFill(grad); g.fillRoundedRectangle(face,corner);
+        g.setColour(juce::Colour(0xff2a323b).withAlpha(0.8f)); g.drawRoundedRectangle(face.reduced(0.5f),corner,1.f);
+        juce::Path topArc; topArc.addRoundedRectangle(face.withHeight(face.getHeight()*0.5f),corner,corner,true,true,false,false);
+        g.setColour(juce::Colours::white.withAlpha(isDown?0.02f:0.05f)); g.fillPath(topArc);
+    }
 };
 
 // A real power/bypass glyph (the universal "circle with a break at top + vertical line through it")
@@ -242,7 +293,8 @@ private:
  // One glow colour per slider group - see GlowSliderLookAndFeel above. sAmt/mAmt/siAmt use each
  // target's established colour; the rest share a neutral accent (same light blue as the PQ logo
  // gradient) since they don't have a colour identity of their own.
- GlowSliderLookAndFeel glowWhite, glowYellow, glowBlue, glowAccent;
+ GlowSliderLookAndFeel glowWhite, glowYellow, glowBlue, glowAccent, glowMono;
+ ConsoleButtonLookAndFeel consoleLnf;
  // I6: JUCE shows a tooltip automatically for any component with setTooltip() text, as long as one
  // TooltipWindow exists somewhere in the plugin's component tree - this is that one instance.
  juce::TooltipWindow tooltipWindow{this, 500};
@@ -264,6 +316,9 @@ private:
  // FIX (item 1): now also draws dB graduation marks (0/-6/-12/-24/-40/-60) down the inside of the
  // meter, like a measuring cylinder, instead of being an unmarked bar.
  void drawVerticalMeter(juce::Graphics&,juce::Rectangle<float>,float levelDb,float peakDb,juce::Colour);
+ // Numbered dB scale drawn in the gap between the IN and OUT meters (per request) - shared by both
+ // since they're always on the same +6..-60dB range.
+ void drawMeterDbScale(juce::Graphics&,juce::Rectangle<float> leftMeter,juce::Rectangle<float> rightMeter);
  // Horizontal dB gridlines + numeric labels (+20..-20dB) along the chart's left edge, plus the
  // 100Hz/10kHz frequency labels alongside the existing 20Hz/1kHz/20kHz ones.
  void drawFreqDbAxis(juce::Graphics&,juce::Rectangle<float>);
