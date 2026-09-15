@@ -857,30 +857,30 @@ void PQContentComponent::paint(juce::Graphics&g){
      const float monoBoxX=42.f, monoBoxW=150.f, monoBoxH=150.f;
      const float ctrlPanelH=10.f+monoBoxH+14.f+30.f+20.f; // top pad + box + gap + button row + bottom pad
      auto ctrlPanel=juce::Rectangle<float>(24.f,chart.getBottom()+32.f,a.getWidth()-48.f,ctrlPanelH);
-     // FIX (sculpted bottom-edge cutout, per spec): this used to be a plain rounded rectangle with a
-     // painted-on shadow/highlight for "depth". The panel's actual silhouette now has a smooth,
-     // large-radius concave cutout carved into the RIGHT side of the panel's bottom edge, coming
-     // back down to full depth under the Mono Maker/button area - built as one continuous Path
-     // (straight edges + quarter-circle corners + a cubic Bezier transition), not a rectangle with
-     // something painted over it. Every layer below (shadow, fill, border, clip regions for the
-     // sheen/spotlight) traces this exact same silhouette, so nothing ever pokes out past the edge.
+     // FIX (was wrong - corrected): the previous version raised roughly HALF the panel's width,
+     // which read as one giant curve across the whole bottom edge - exactly what was asked not to
+     // do. The bottom edge is now straight everywhere except one small, genuinely localized notch
+     // (about 90px wide) right at the seam where the Mono Maker module meets the main tray - a tiny
+     // carved detail, not a restructuring of the panel's overall shape.
      juce::Path panelPath;
      {
          constexpr float pi=juce::MathConstants<float>::pi;
          const float cornerR=16.f;
-         const float carveRise=16.f;                         // subtle - how much shorter the right section is
-         const float deepFlatEnd=monoBoxX+monoBoxW+90.f;      // left edge of the flat, full-depth shelf under the buttons
-         const float curveStartX=deepFlatEnd+200.f;           // where the curve begins (moving right) and the raised right section starts
+         const float notchRise=8.f;                              // very subtle - just a small carved detail
+         const float notchCenterX=monoBoxX+monoBoxW+12.f;        // right at the Mono Maker / main tray seam
+         const float notchHalfWidth=45.f;                        // small - ~90px total, nowhere near the full width
          float left=ctrlPanel.getX(), top=ctrlPanel.getY(), right=ctrlPanel.getRight();
-         float yDeep=ctrlPanel.getBottom(), yRaised=yDeep-carveRise;
+         float yBase=ctrlPanel.getBottom(), yNotch=yBase-notchRise;
+         float notchStart=notchCenterX-notchHalfWidth, notchEnd=notchCenterX+notchHalfWidth;
          panelPath.startNewSubPath(left, top+cornerR);
          panelPath.addArc(left, top, cornerR*2.f, cornerR*2.f, pi*1.5f, pi*2.f, false);                              // top-left
          panelPath.addArc(right-cornerR*2.f, top, cornerR*2.f, cornerR*2.f, 0.f, pi*0.5f, false);                    // top-right
-         panelPath.addArc(right-cornerR*2.f, yRaised-cornerR*2.f, cornerR*2.f, cornerR*2.f, pi*0.5f, pi, false);     // bottom-right - RAISED (shorter) here
-         panelPath.lineTo(curveStartX, yRaised);                                                                      // flat raised shelf, right portion
-         panelPath.cubicTo(curveStartX-100.f, yRaised, deepFlatEnd+100.f, yDeep, deepFlatEnd, yDeep);                 // the cutout curve - dips DOWN moving left
-         panelPath.lineTo(left+cornerR, yDeep);                                                                       // flat full-depth shelf under Mono Maker/buttons
-         panelPath.addArc(left, yDeep-cornerR*2.f, cornerR*2.f, cornerR*2.f, pi, pi*1.5f, false);                    // bottom-left - full depth here
+         panelPath.addArc(right-cornerR*2.f, yBase-cornerR*2.f, cornerR*2.f, cornerR*2.f, pi*0.5f, pi, false);       // bottom-right (normal, straight edge)
+         panelPath.lineTo(notchEnd, yBase);                                                                           // flat bottom, right of the notch
+         panelPath.cubicTo(notchEnd-notchHalfWidth*0.6f,yBase, notchCenterX+notchHalfWidth*0.3f,yNotch, notchCenterX,yNotch); // rise into the notch
+         panelPath.cubicTo(notchCenterX-notchHalfWidth*0.3f,yNotch, notchStart+notchHalfWidth*0.6f,yBase, notchStart,yBase);  // back down out of it
+         panelPath.lineTo(left+cornerR, yBase);                                                                       // flat bottom, everywhere else (straight)
+         panelPath.addArc(left, yBase-cornerR*2.f, cornerR*2.f, cornerR*2.f, pi, pi*1.5f, false);                    // bottom-left (normal, straight edge)
          panelPath.closeSubPath();
      }
      juce::DropShadow panelShadow(juce::Colours::black.withAlpha(0.55f),16,juce::Point<int>(0,6));
@@ -936,26 +936,33 @@ void PQContentComponent::paint(juce::Graphics&g){
  label(g,"LOW HZ",{zone2X,(float)y+2,100,18},muted()); label(g,"HIGH HZ",{zone2X,(float)y+44,100,18},muted());
  label(g,"MODE",{zone3X,(float)y+2,100,18},muted()); label(g,"STAGE",{zone3X,(float)y+44,100,18},muted());
  label(g,"WIDTH AMT",{zone4X,(float)y+2,100,18},muted()); label(g,"DEPTH %",{zone4X,(float)y+44,100,18},muted());
- // Mono Maker's own vertical box, far left - now sized to its actual content (label + fader + value
- // box) instead of an arbitrary taller height - beveled the same way as the main panel, with a
- // brighter/thicker accent border so it reads as clearly "raised" per the request.
+ // Mono Maker's own vertical module, far left - separated from the main tray by DEPTH (its own
+ // slightly lighter surface tone, a stronger shadow beneath it, and a faint top highlight), not by a
+ // bright colour outline. #2E7CC2/blueLight() belongs to SIDE and active controls, not to this
+ // module's structure.
  {
      juce::Rectangle<float> monoBox(monoBoxX,chart.getBottom()+42.f,monoBoxW,monoBoxH);
-     g.setColour(juce::Colours::black.withAlpha(0.4f));
-     g.fillRoundedRectangle(monoBox.translated(0.f,4.f),10.f);
-     auto monoFace=monoBox.withTrimmedBottom(4.f);
-     juce::ColourGradient monoGrad(juce::Colour(0xff1d2633),monoFace.getX(),monoFace.getY(),juce::Colour(0xff141b25),monoFace.getX(),monoFace.getBottom(),false);
+     // Stronger shadow than the main tray's own - this alone is most of what sells "raised module
+     // sitting on top of the tray" rather than "flat panel with a line drawn around it".
+     g.setColour(juce::Colours::black.withAlpha(0.5f));
+     g.fillRoundedRectangle(monoBox.translated(0.f,5.f),10.f);
+     auto monoFace=monoBox.withTrimmedBottom(5.f);
+     // One tone level lighter than the main tray's own gradient (which runs raisedPanel->buttonBg) -
+     // this reads as "a surface sitting slightly above" the tray it's on, per the requested hierarchy.
+     juce::ColourGradient monoGrad(juce::Colour(0xff232d3d),monoFace.getX(),monoFace.getY(),juce::Colour(0xff1d2633),monoFace.getX(),monoFace.getBottom(),false);
      g.setGradientFill(monoGrad); g.fillRoundedRectangle(monoFace,10.f);
-     // FIX (misread earlier - corrected): "top/bottom shorter by 15% each side" meant the WHOLE
-     // border rectangle narrows in by 15% of the box width on the left and right (still one closed,
-     // connected rectangle, full height top-to-bottom) - not four separate disconnected line segments
-     // floating with gaps between them.
+     // Subtle top highlight - a faint light catching the raised surface's top edge.
      {
-         float inset=monoFace.getWidth()*0.15f;
-         auto borderRect=monoFace.reduced(inset,0.f).reduced(0.75f);
-         g.setColour(blueLight().withAlpha(0.95f));
-         g.drawRoundedRectangle(borderRect,8.f,2.2f);
+         juce::Path clip; clip.addRoundedRectangle(monoFace,10.f);
+         g.saveState(); g.reduceClipRegion(clip);
+         g.setColour(juce::Colours::white.withAlpha(0.05f));
+         g.fillRect(monoFace.withHeight(monoFace.getHeight()*0.22f));
+         g.restoreState();
      }
+     // FIX (was wrong - corrected): no bright blue outline. Just a very faint neutral border
+     // (#313942, low opacity) - separation comes from the tone/shadow above, not a coloured frame.
+     g.setColour(grid().withAlpha(0.55f));
+     g.drawRoundedRectangle(monoFace.reduced(0.5f),10.f,1.f);
      // FIX (requested): label turns yellow (MID's colour - matches the fader's own accent look less
      // literally, but is what was asked for) and is centred exactly above the fader, not left-aligned
      // across the whole box width.
