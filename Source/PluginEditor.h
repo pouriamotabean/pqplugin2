@@ -321,7 +321,7 @@ private:
  void drawVerticalMeter(juce::Graphics&,juce::Rectangle<float>,float levelDb,float peakDb,juce::Colour);
  // Numbered dB scale drawn in the gap between the IN and OUT meters (per request) - shared by both
  // since they're always on the same +6..-60dB range.
- void drawMeterDbScale(juce::Graphics&,juce::Rectangle<float> leftMeter,juce::Rectangle<float> rightMeter);
+ void drawMeterDbScale(juce::Graphics&,juce::Rectangle<float> scaleArea,juce::Rectangle<float> referenceMeterForHeight);
  // Horizontal dB gridlines + numeric labels (+20..-20dB) along the chart's left edge, plus the
  // 100Hz/10kHz frequency labels alongside the existing 20Hz/1kHz/20kHz ones.
  void drawFreqDbAxis(juce::Graphics&,juce::Rectangle<float>);
