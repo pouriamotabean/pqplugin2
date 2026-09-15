@@ -859,28 +859,28 @@ void PQContentComponent::paint(juce::Graphics&g){
      auto ctrlPanel=juce::Rectangle<float>(24.f,chart.getBottom()+32.f,a.getWidth()-48.f,ctrlPanelH);
      // FIX (sculpted bottom-edge cutout, per spec): this used to be a plain rounded rectangle with a
      // painted-on shadow/highlight for "depth". The panel's actual silhouette now has a smooth,
-     // large-radius concave cutout carved into the bottom edge under the CAPTURE/APPLY/CLEAR button
-     // area - built as one continuous Path (straight edges + quarter-circle corners + a cubic Bezier
-     // transition), not a rectangle with something painted over it. Every layer below (shadow, fill,
-     // border, clip regions for the sheen/spotlight) traces this exact same silhouette, so nothing
-     // ever pokes out past the carved edge.
+     // large-radius concave cutout carved into the RIGHT side of the panel's bottom edge, coming
+     // back down to full depth under the Mono Maker/button area - built as one continuous Path
+     // (straight edges + quarter-circle corners + a cubic Bezier transition), not a rectangle with
+     // something painted over it. Every layer below (shadow, fill, border, clip regions for the
+     // sheen/spotlight) traces this exact same silhouette, so nothing ever pokes out past the edge.
      juce::Path panelPath;
      {
          constexpr float pi=juce::MathConstants<float>::pi;
          const float cornerR=16.f;
-         const float carveRise=10.f;                        // subtle - how much shorter the carved section is
-         const float carveFlatEnd=monoBoxX+monoBoxW+90.f;    // right edge of the flat carved shelf - comfortably past CLEAR's right edge
-         const float carveXEnd=carveFlatEnd+180.f;           // where the curve finishes and rejoins the normal edge
+         const float carveRise=16.f;                         // subtle - how much shorter the right section is
+         const float deepFlatEnd=monoBoxX+monoBoxW+90.f;      // left edge of the flat, full-depth shelf under the buttons
+         const float curveStartX=deepFlatEnd+200.f;           // where the curve begins (moving right) and the raised right section starts
          float left=ctrlPanel.getX(), top=ctrlPanel.getY(), right=ctrlPanel.getRight();
-         float yNormal=ctrlPanel.getBottom(), yCarved=yNormal-carveRise;
+         float yDeep=ctrlPanel.getBottom(), yRaised=yDeep-carveRise;
          panelPath.startNewSubPath(left, top+cornerR);
          panelPath.addArc(left, top, cornerR*2.f, cornerR*2.f, pi*1.5f, pi*2.f, false);                              // top-left
          panelPath.addArc(right-cornerR*2.f, top, cornerR*2.f, cornerR*2.f, 0.f, pi*0.5f, false);                    // top-right
-         panelPath.addArc(right-cornerR*2.f, yNormal-cornerR*2.f, cornerR*2.f, cornerR*2.f, pi*0.5f, pi, false);     // bottom-right (normal height)
-         panelPath.lineTo(carveXEnd, yNormal);                                                                        // flat bottom edge, right portion
-         panelPath.cubicTo(carveXEnd-90.f, yNormal, carveFlatEnd+90.f, yCarved, carveFlatEnd, yCarved);               // the carve itself
-         panelPath.lineTo(left+cornerR, yCarved);                                                                     // flat carved shelf
-         panelPath.addArc(left, yCarved-cornerR*2.f, cornerR*2.f, cornerR*2.f, pi, pi*1.5f, false);                  // bottom-left (carved height)
+         panelPath.addArc(right-cornerR*2.f, yRaised-cornerR*2.f, cornerR*2.f, cornerR*2.f, pi*0.5f, pi, false);     // bottom-right - RAISED (shorter) here
+         panelPath.lineTo(curveStartX, yRaised);                                                                      // flat raised shelf, right portion
+         panelPath.cubicTo(curveStartX-100.f, yRaised, deepFlatEnd+100.f, yDeep, deepFlatEnd, yDeep);                 // the cutout curve - dips DOWN moving left
+         panelPath.lineTo(left+cornerR, yDeep);                                                                       // flat full-depth shelf under Mono Maker/buttons
+         panelPath.addArc(left, yDeep-cornerR*2.f, cornerR*2.f, cornerR*2.f, pi, pi*1.5f, false);                    // bottom-left - full depth here
          panelPath.closeSubPath();
      }
      juce::DropShadow panelShadow(juce::Colours::black.withAlpha(0.55f),16,juce::Point<int>(0,6));
@@ -946,23 +946,15 @@ void PQContentComponent::paint(juce::Graphics&g){
      auto monoFace=monoBox.withTrimmedBottom(4.f);
      juce::ColourGradient monoGrad(juce::Colour(0xff1d2633),monoFace.getX(),monoFace.getY(),juce::Colour(0xff141b25),monoFace.getX(),monoFace.getBottom(),false);
      g.setGradientFill(monoGrad); g.fillRoundedRectangle(monoFace,10.f);
-     // FIX (requested): border is now a "bracket" style frame - left/right sides run full height
-     // untouched, but the top/bottom edges are inset 15% in from each side, so the frame reads as
-     // lighter/more refined without touching the box's actual height at all.
+     // FIX (misread earlier - corrected): "top/bottom shorter by 15% each side" meant the WHOLE
+     // border rectangle narrows in by 15% of the box width on the left and right (still one closed,
+     // connected rectangle, full height top-to-bottom) - not four separate disconnected line segments
+     // floating with gaps between them.
      {
-         auto b=monoFace.reduced(0.75f);
-         float inset=b.getWidth()*0.15f;
-         const float cornerR=10.f; // matches monoFace's own fillRoundedRectangle radius above
+         float inset=monoFace.getWidth()*0.15f;
+         auto borderRect=monoFace.reduced(inset,0.f).reduced(0.75f);
          g.setColour(blueLight().withAlpha(0.95f));
-         // FIX (corner mismatch): verticals now stop cornerR short of the top/bottom instead of
-         // running the full straight-cornered height - the fill beneath has ROUNDED corners, so a
-         // straight line running all the way to the corner stuck out past that curve, visibly
-         // clashing with it. Stopping short of the curve entirely (rather than trying to match the
-         // curve exactly) keeps every straight segment cleanly inside the fill's straight edges.
-         g.drawLine(b.getX(),b.getY()+cornerR,b.getX(),b.getBottom()-cornerR,2.2f);
-         g.drawLine(b.getRight(),b.getY()+cornerR,b.getRight(),b.getBottom()-cornerR,2.2f);
-         g.drawLine(b.getX()+inset,b.getY(),b.getRight()-inset,b.getY(),2.2f);
-         g.drawLine(b.getX()+inset,b.getBottom(),b.getRight()-inset,b.getBottom(),2.2f);
+         g.drawRoundedRectangle(borderRect,8.f,2.2f);
      }
      // FIX (requested): label turns yellow (MID's colour - matches the fader's own accent look less
      // literally, but is what was asked for) and is centred exactly above the fader, not left-aligned
