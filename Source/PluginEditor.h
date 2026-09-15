@@ -157,6 +157,33 @@ private:
     juce::Colour glowColour{juce::Colours::white};
 };
 
+// A real power/bypass glyph (the universal "circle with a break at top + vertical line through it")
+// next to the text, instead of a plain text-only button - small detail, but this kind of thing is
+// what reads as "made with care" rather than a placeholder. on/off state is pushed in externally via
+// setOn() (see PQAudioProcessorEditor::refreshBypassButton()), same reasoning as DotTabButton above.
+class BypassButton : public juce::TextButton {
+public:
+    using juce::TextButton::TextButton;
+    void setOn(bool v){ on=v; repaint(); }
+    void paintButton(juce::Graphics& g, bool isMouseOver, bool) override {
+        auto r=getLocalBounds().toFloat();
+        juce::Colour amber(0xffff9a3f);
+        g.setColour(on?amber:juce::Colour(0xff101419)); g.fillRoundedRectangle(r,8.f);
+        g.setColour(on?amber:(isMouseOver?juce::Colour(0xff3a4148):juce::Colour(0xff242a31))); g.drawRoundedRectangle(r.reduced(0.75f),8.f,1.f);
+        float iconR=7.f, cx=r.getX()+22.f, cy=r.getCentreY();
+        juce::Colour iconColour = on ? juce::Colours::black : juce::Colour(0xff737e89);
+        juce::Path arc; arc.addCentredArc(cx,cy,iconR,iconR,0.f,juce::MathConstants<float>::pi*0.22f,juce::MathConstants<float>::pi*1.78f,true);
+        g.setColour(iconColour); g.strokePath(arc,juce::PathStrokeType(1.8f));
+        g.drawLine(cx,cy-iconR-1.f,cx,cy-2.f,1.8f);
+        g.setColour(on?juce::Colours::black:juce::Colour(0xfff2f4f7));
+        g.setFont(juce::FontOptions(13).withStyle("bold"));
+        float textX=cx+iconR+10.f;
+        g.drawText(getButtonText(),textX,0.f,r.getRight()-textX-8.f,r.getHeight(),juce::Justification::centredLeft);
+    }
+private:
+    bool on=false;
+};
+
 class PQAudioProcessorEditor:public juce::AudioProcessorEditor,private juce::Timer{
 public: explicit PQAudioProcessorEditor(PQAudioProcessor&); ~PQAudioProcessorEditor() override; void paint(juce::Graphics&)override; void resized()override;
  // Manual EQ (Pro-Q style) is mouse-only - no sliders/knobs at all - so it lives on the chart itself.
@@ -167,8 +194,12 @@ public: explicit PQAudioProcessorEditor(PQAudioProcessor&); ~PQAudioProcessorEdi
  // not just via the right-click "Delete Band" menu item.
  bool keyPressed(const juce::KeyPress&) override;
 private:
- PQAudioProcessor& p; DotTabButton stereo{"STEREO"},mid{"MID"},side{"SIDE"}; juce::TextButton capture{"CAPTURE"},apply{"APPLY"},clear{"CLEAR"},widthStage{"PRE"},bypass{"BYPASS"}; MatchGainButton matchGainBtn{"MATCH GAIN"}; KebabButton presetsBtn;
+ PQAudioProcessor& p; DotTabButton stereo{"STEREO"},mid{"MID"},side{"SIDE"}; juce::TextButton capture{"CAPTURE"},apply{"APPLY"},clear{"CLEAR"},widthStage{"PRE"}; BypassButton bypass{"BYPASS"}; MatchGainButton matchGainBtn{"MATCH GAIN"}; KebabButton presetsBtn;
  juce::Slider sAmt,mAmt,siAmt,low,high,width,depth;
+ // Mono Maker (0-100%, log-mapped to a 20Hz-20kHz cutoff on Side - see PQAudioProcessor::
+ // monoMakerAmount): sits in the MATCH AMOUNT column, right under STEREO/MID/SIDE, filling the space
+ // that column otherwise leaves empty and giving it a genuine second purpose beyond match correction.
+ juce::Slider monoMaker;
  // Max dB / Smoothing are no longer exposed as sliders (kept fixed at sane defaults in the
  // processor); this screen space now holds the input/output level meters + trim faders instead.
  juce::Slider inputTrim,outputTrim; juce::Rectangle<float> inputMeterArea,outputMeterArea;
@@ -213,6 +244,11 @@ private:
  void refreshBandButtons();
  void refreshBypassButton();
  void drawCurve(juce::Graphics&,juce::Rectangle<float>,const std::array<std::atomic<float>,PQAudioProcessor::kBins>&,juce::Colour); void drawRef(juce::Graphics&,juce::Rectangle<float>,const std::array<std::atomic<float>,PQAudioProcessor::kBins>&,juce::Colour);
+ // Delta overlay: draws the auto-match correction curve itself (PQAudioProcessor::corrStereo/Mid/
+ // Side) - i.e. what the automatic matching is actually adding/removing, which is exactly what
+ // "difference between input and output" means for an EQ. Dashed so it reads as an overlay, not a
+ // fourth solid curve competing with Stereo/Mid/Side.
+ void drawDeltaCurve(juce::Graphics&,const std::array<std::atomic<float>,PQAudioProcessor::kBands>&,juce::Colour);
  void drawRangeMask(juce::Graphics&,juce::Rectangle<float>);
  // Minimal vertical bar meter (input/output level), drawn behind the trim slider of the same name.
  // peakDb draws the thin peak-hold line (see PQAudioProcessor::inputPeakDb/outputPeakDb).
@@ -230,6 +266,10 @@ private:
  // Backspace has something to act on after mouseUp. Cleared on click-to-empty-space or deletion.
  int selectedBand=-1;
  static constexpr float kManualGainRangeDb=24.f; // the manual EQ node chart shows +/- this many dB
+ // FIX (match amount too aggressive): see the constructor - the STEREO/MID/SIDE sliders' displayed
+ // 0-100% maps to 0-kMatchAmountCap of actual applied correction, since adjacent EQ bands stacking
+ // made 100% far more drastic than the label suggested.
+ static constexpr float kMatchAmountCap=0.30f;
  float xToFreq(float x) const; float freqToX(float hz) const;
  float yToGainDb(float y) const; float gainDbToY(float gainDb) const;
  int findBandNear(juce::Point<float> pos) const; // returns index within grab radius, or -1
