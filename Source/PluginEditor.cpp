@@ -854,7 +854,7 @@ void PQContentComponent::paint(juce::Graphics&g){
      // oversized panel, leaving visible dead space below their own (much shorter) content. Both
      // numbers below are now sized to what Mono Maker actually needs, and the panel height is
      // derived directly from that instead of a separate guessed constant.
-     const float monoBoxW=150.f, monoBoxH=150.f;
+     const float monoBoxX=42.f, monoBoxW=150.f, monoBoxH=150.f;
      const float ctrlPanelH=10.f+monoBoxH+14.f+30.f+20.f; // top pad + box + gap + button row + bottom pad
      auto ctrlPanel=juce::Rectangle<float>(24.f,chart.getBottom()+32.f,a.getWidth()-48.f,ctrlPanelH);
      // FIX (raised/beveled edges, per request): darker base face offset down + gradient front face +
