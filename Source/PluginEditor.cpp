@@ -891,10 +891,14 @@ void PQContentComponent::paint(juce::Graphics&g){
  const float monoBoxX=42.f, monoBoxW=150.f, monoBoxH=150.f, panelGap=24.f;
  const float panelX=monoBoxX+monoBoxW+panelGap;
  const float panelRight=a.getWidth()-42.f;
- const float panelW=panelRight-panelX;
- const float zone1W=330.f, zoneGap=40.f;
- const float zoneW=(panelW-zone1W-3.f*zoneGap)/3.f;
- const float zone1X=panelX, zone2X=zone1X+zone1W+zoneGap, zone3X=zone2X+zoneW+zoneGap, zone4X=zone3X+zoneW+zoneGap;
+ // FIX (per reference spec image): column widths are no longer an equal three-way split of
+ // whatever space is left - they're the spec's exact 200/200/180/160px (Match Amount/Frequency
+ // Range/Stereoization/Width Amt), scaled by kx = our design width / the spec's reference width
+ // (1320/1280) so the *proportions* match exactly without touching our own canvas size.
+ constexpr float kx=1320.f/1280.f;
+ const float zoneGap=40.f;
+ const float zone1W=200.f*kx, zone2W=200.f*kx, zone3W=180.f*kx, zone4W=160.f*kx;
+ const float zone1X=panelX, zone2X=zone1X+zone1W+zoneGap, zone3X=zone2X+zone2W+zoneGap, zone4X=zone3X+zone3W+zoneGap;
  const float sliderIndent=75.f; // room for the row label before the slider starts, within zone1
  const float matchSliderW=zone1W-sliderIndent-8.f;
  int y=(int)chart.getBottom()+70;
@@ -905,7 +909,7 @@ void PQContentComponent::paint(juce::Graphics&g){
  // Thin divider lines between zones, matching the reference's separated-columns look. Bottom now
  // tracks Mono Maker's (shorter) box height instead of a leftover taller constant.
  g.setColour(grid());
- for(float dx:{zone1X+zone1W+zoneGap*0.5f, zone2X+zoneW+zoneGap*0.5f, zone3X+zoneW+zoneGap*0.5f})
+ for(float dx:{zone1X+zone1W+zoneGap*0.5f, zone2X+zone2W+zoneGap*0.5f, zone3X+zone3W+zoneGap*0.5f})
      g.drawLine(dx,chart.getBottom()+44.f,dx,chart.getBottom()+42.f+monoBoxH,1.f);
  const float matchSliderX=zone1X+sliderIndent;
  label(g,"STEREO",{zone1X+3,(float)y+2,80,18},white()); label(g,"MID",{zone1X+3,(float)y+38,80,18},yellow()); label(g,"SIDE",{zone1X+3,(float)y+74,80,18},blue());
@@ -1017,16 +1021,18 @@ void PQContentComponent::resized(){auto a=getLocalBounds();
  const float monoBoxX=42.f, monoBoxW=150.f, monoBoxH=150.f, panelGap=24.f;
  const float panelX=monoBoxX+monoBoxW+panelGap;
  const float panelRight=(float)a.getWidth()-42.f;
- const float panelW=panelRight-panelX;
- const float zone1W=330.f, zoneGap=40.f;
- const float zoneW=(panelW-zone1W-3.f*zoneGap)/3.f;
- const float zone1X=panelX, zone2X=zone1X+zone1W+zoneGap, zone3X=zone2X+zoneW+zoneGap, zone4X=zone3X+zoneW+zoneGap;
+ // FIX (per reference spec image - matches paint()): exact 200/200/180/160px column widths, scaled
+ // by kx (our design width / the spec's reference width) instead of an equal three-way split.
+ constexpr float kx=1320.f/1280.f;
+ const float zoneGap=40.f;
+ const float zone1W=200.f*kx, zone2W=200.f*kx, zone3W=180.f*kx, zone4W=160.f*kx;
+ const float zone1X=panelX, zone2X=zone1X+zone1W+zoneGap, zone3X=zone2X+zone2W+zoneGap, zone4X=zone3X+zone3W+zoneGap;
  const float sliderIndent=75.f;
  const float matchSliderW=zone1W-sliderIndent-8.f;
  const float matchSliderX=zone1X+sliderIndent;
- const float zoneCtrlW=zoneW-8.f;
+ const float zone2CtrlW=zone2W-8.f, zone3CtrlW=zone3W-8.f, zone4CtrlW=zone4W-8.f;
  sAmt.setBounds((int)matchSliderX,y,(int)matchSliderW,22);mAmt.setBounds((int)matchSliderX,y+38,(int)matchSliderW,22);siAmt.setBounds((int)matchSliderX,y+74,(int)matchSliderW,22);
- low.setBounds((int)zone2X,y+18,(int)zoneCtrlW,22);high.setBounds((int)zone2X,y+60,(int)zoneCtrlW,22);
+ low.setBounds((int)zone2X,y+18,(int)zone2CtrlW,22);high.setBounds((int)zone2X,y+60,(int)zone2CtrlW,22);
  // Mono Maker: vertical fader inside its own (now compact) box - 100px of actual track + 20px for
  // the built-in TextBoxBelow value readout, starting right under the "MONO MAKER" header.
  monoMaker.setBounds((int)(monoBoxX+(monoBoxW-50.f)/2.f),(int)chart.getBottom()+76,50,100);
@@ -1049,8 +1055,8 @@ void PQContentComponent::resized(){auto a=getLocalBounds();
      inputTrim.setBounds(inTrimRail.toNearestInt()); outputTrim.setBounds(outTrimRail.toNearestInt());
      matchGainBtn.setBounds(btnRow.toNearestInt());
  }
- mode.setBounds((int)zone3X,y+18,(int)zoneCtrlW,25);widthStage.setBounds((int)zone3X,y+60,(int)zoneCtrlW,25);
- width.setBounds((int)zone4X,y+18,(int)zoneCtrlW,25);depth.setBounds((int)zone4X,y+60,(int)zoneCtrlW,25);
+ mode.setBounds((int)zone3X,y+18,(int)zone3CtrlW,25);widthStage.setBounds((int)zone3X,y+60,(int)zone3CtrlW,25);
+ width.setBounds((int)zone4X,y+18,(int)zone4CtrlW,25);depth.setBounds((int)zone4X,y+60,(int)zone4CtrlW,25);
  // Buttons now sit directly under the (now compact) Mono Maker box, matching the reference's layout.
  const int btnY=(int)chart.getBottom()+42+(int)monoBoxH+14;
  capture.setBounds((int)monoBoxX,btnY,68,30);apply.setBounds((int)monoBoxX+74,btnY,62,30);clear.setBounds((int)monoBoxX+142,btnY,58,30);
