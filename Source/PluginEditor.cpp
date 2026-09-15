@@ -911,13 +911,15 @@ void PQContentComponent::paint(juce::Graphics&g){
  const float monoBoxX=42.f, monoBoxW=150.f, monoBoxH=150.f, panelGap=24.f;
  const float panelX=monoBoxX+monoBoxW+panelGap;
  const float panelRight=a.getWidth()-42.f;
- // FIX (per reference spec image): column widths are no longer an equal three-way split of
- // whatever space is left - they're the spec's exact 200/200/180/160px (Match Amount/Frequency
- // Range/Stereoization/Width Amt), scaled by kx = our design width / the spec's reference width
- // (1320/1280) so the *proportions* match exactly without touching our own canvas size.
+ // FIX (requested - eliminates wasted space on the right): FREQUENCY RANGE/STEREOIZATION/WIDTH AMT
+ // keep the spec's exact scaled widths (they were never the problem), but MATCH AMOUNT now absorbs
+ // every bit of width left over after those three - instead of also using a fixed spec width and
+ // leaving ~180px of genuinely unused panel space to the right of WIDTH AMT, as it did before.
  constexpr float kx=1320.f/1280.f;
  const float zoneGap=40.f;
- const float zone1W=200.f*kx, zone2W=200.f*kx, zone3W=180.f*kx, zone4W=160.f*kx;
+ const float zone2W=200.f*kx, zone3W=180.f*kx, zone4W=160.f*kx;
+ const float panelW=panelRight-panelX;
+ const float zone1W=panelW-zone2W-zone3W-zone4W-3.f*zoneGap;
  const float zone1X=panelX, zone2X=zone1X+zone1W+zoneGap, zone3X=zone2X+zone2W+zoneGap, zone4X=zone3X+zone3W+zoneGap;
  const float sliderIndent=75.f; // room for the row label before the slider starts, within zone1
  const float matchSliderW=zone1W-sliderIndent-8.f;
@@ -1046,11 +1048,12 @@ void PQContentComponent::resized(){auto a=getLocalBounds();
  const float monoBoxX=42.f, monoBoxW=150.f, monoBoxH=150.f, panelGap=24.f;
  const float panelX=monoBoxX+monoBoxW+panelGap;
  const float panelRight=(float)a.getWidth()-42.f;
- // FIX (per reference spec image - matches paint()): exact 200/200/180/160px column widths, scaled
- // by kx (our design width / the spec's reference width) instead of an equal three-way split.
+ // FIX (matches paint()): MATCH AMOUNT absorbs all leftover width, eliminating the wasted space.
  constexpr float kx=1320.f/1280.f;
  const float zoneGap=40.f;
- const float zone1W=200.f*kx, zone2W=200.f*kx, zone3W=180.f*kx, zone4W=160.f*kx;
+ const float zone2W=200.f*kx, zone3W=180.f*kx, zone4W=160.f*kx;
+ const float panelW=panelRight-panelX;
+ const float zone1W=panelW-zone2W-zone3W-zone4W-3.f*zoneGap;
  const float zone1X=panelX, zone2X=zone1X+zone1W+zoneGap, zone3X=zone2X+zone2W+zoneGap, zone4X=zone3X+zone3W+zoneGap;
  const float sliderIndent=75.f;
  const float matchSliderW=zone1W-sliderIndent-8.f;
