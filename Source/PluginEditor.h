@@ -203,8 +203,11 @@ public:
         juce::ColourGradient grad(top,face.getX(),face.getY(),bot,face.getX(),face.getBottom(),false);
         g.setGradientFill(grad); g.fillRoundedRectangle(face,corner);
         g.setColour(juce::Colour(0xff2a323b).withAlpha(0.8f)); g.drawRoundedRectangle(face.reduced(0.5f),corner,1.f);
-        juce::Path topArc; auto tr=face.withHeight(face.getHeight()*0.5f); topArc.addRoundedRectangle(tr.getX(),tr.getY(),tr.getWidth(),tr.getHeight(),corner,true,true,false,false);
-        g.setColour(juce::Colours::white.withAlpha(isDown?0.02f:0.05f)); g.fillPath(topArc);
+        juce::Path facePath; facePath.addRoundedRectangle(face,corner);
+        g.saveState(); g.reduceClipRegion(facePath);
+        g.setColour(juce::Colours::white.withAlpha(isDown?0.02f:0.05f));
+        g.fillRect(face.withHeight(face.getHeight()*0.5f));
+        g.restoreState();
     }
 };
 
