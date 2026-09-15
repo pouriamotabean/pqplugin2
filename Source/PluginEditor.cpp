@@ -825,8 +825,10 @@ void PQContentComponent::paint(juce::Graphics&g){
      auto face=ctrlPanel.withTrimmedBottom(5.f);
      juce::ColourGradient panelGrad(juce::Colour(0xff141a22),face.getX(),face.getY(),juce::Colour(0xff0c0f14),face.getX(),face.getBottom(),false);
      g.setGradientFill(panelGrad); g.fillRoundedRectangle(face,14.f);
-     juce::Path topArc; auto tr=face.withHeight(face.getHeight()*0.3f); topArc.addRoundedRectangle(tr.getX(),tr.getY(),tr.getWidth(),tr.getHeight(),14.f,true,true,false,false);
-     g.setColour(juce::Colours::white.withAlpha(0.035f)); g.fillPath(topArc);
+     juce::Path facePath2; facePath2.addRoundedRectangle(face,14.f);
+     g.saveState(); g.reduceClipRegion(facePath2);
+     g.setColour(juce::Colours::white.withAlpha(0.035f)); g.fillRect(face.withHeight(face.getHeight()*0.3f));
+     g.restoreState();
  }
  // FIX (layout, per reference mockup): Mono Maker moves out to its own vertical box on the far left
  // (matching the reference exactly) - everything else reorganizes into four bordered zones (MATCH
