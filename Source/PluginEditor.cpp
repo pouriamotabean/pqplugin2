@@ -922,8 +922,23 @@ void PQContentComponent::paint(juce::Graphics&g){
      auto monoFace=monoBox.withTrimmedBottom(4.f);
      juce::ColourGradient monoGrad(juce::Colour(0xff1d2633),monoFace.getX(),monoFace.getY(),juce::Colour(0xff141b25),monoFace.getX(),monoFace.getBottom(),false);
      g.setGradientFill(monoGrad); g.fillRoundedRectangle(monoFace,10.f);
-     g.setColour(accentHi.withAlpha(0.65f)); g.drawRoundedRectangle(monoFace.reduced(0.75f),10.f,1.6f);
-     label(g,"MONO MAKER",{monoBoxX,chart.getBottom()+52.f,monoBoxW,18},accentHi);
+     // FIX (requested): border is now a "bracket" style frame - left/right sides run full height
+     // untouched, but the top/bottom edges are inset 15% in from each side, so the frame reads as
+     // lighter/more refined without touching the box's actual height at all.
+     {
+         auto b=monoFace.reduced(0.75f);
+         float inset=b.getWidth()*0.15f;
+         g.setColour(accentHi.withAlpha(0.65f));
+         g.drawLine(b.getX(),b.getY(),b.getX(),b.getBottom(),1.6f);
+         g.drawLine(b.getRight(),b.getY(),b.getRight(),b.getBottom(),1.6f);
+         g.drawLine(b.getX()+inset,b.getY(),b.getRight()-inset,b.getY(),1.6f);
+         g.drawLine(b.getX()+inset,b.getBottom(),b.getRight()-inset,b.getBottom(),1.6f);
+     }
+     // FIX (requested): label turns yellow (MID's colour - matches the fader's own accent look less
+     // literally, but is what was asked for) and is centred exactly above the fader, not left-aligned
+     // across the whole box width.
+     g.setColour(yellow()); g.setFont(juce::FontOptions(10));
+     g.drawText("MONO MAKER",monoBox.withY(chart.getBottom()+52.f).withHeight(18),juce::Justification::centred);
  }
  // FIX (two-rail meter style, per reference): each side (IN/OUT) is now a thin plain "trim" rail
  // (just the fader dot, no fill - matches the reference exactly) next to a separate, slightly wider
