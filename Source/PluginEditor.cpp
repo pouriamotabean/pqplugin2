@@ -1,5 +1,23 @@
 #include "PluginEditor.h"
-namespace {juce::Colour white(){return juce::Colour(0xfff2f4f7);} juce::Colour yellow(){return juce::Colour(0xffffcf3f);} juce::Colour blue(){return juce::Colour(0xff55a8ff);} juce::Colour bg(){return juce::Colour(0xff07090c);} juce::Colour panel(){return juce::Colour(0xff101419);} juce::Colour grid(){return juce::Colour(0xff242a31);} juce::Colour muted(){return juce::Colour(0xff737e89);} juce::Colour dim(){return juce::Colour(0xff3a4148);}
+namespace {
+// FIX (design spec, exact hex values): every colour below now matches the reference spec document
+// 1:1 - no more eyeballed approximations. blueLight()/secondaryText()/rawBg() are new (the spec
+// distinguishes a few colours we didn't previously have separate functions for).
+juce::Colour white(){return juce::Colour(0xffeef0f2);}        // STEREO / primary text
+juce::Colour yellow(){return juce::Colour(0xffe5bc1e);}       // MID
+juce::Colour blue(){return juce::Colour(0xff2e7cc2);}         // SIDE
+juce::Colour blueLight(){return juce::Colour(0xff96c8f2);}    // SIDE active/light, peak indicators
+juce::Colour bg(){return juce::Colour(0xff10161e);}           // secondary/main background
+juce::Colour rawBg(){return juce::Colour(0xff0d1117);}        // main window background
+juce::Colour panel(){return juce::Colour(0xff161e2b);}        // panel background
+juce::Colour raisedPanel(){return juce::Colour(0xff1d2633);}  // raised/inner panel
+juce::Colour grid(){return juce::Colour(0xff313942);}         // border
+juce::Colour darkBorder(){return juce::Colour(0xff080b0f);}   // dark border / recess edge
+juce::Colour muted(){return juce::Colour(0xff6f7a86);}        // muted text
+juce::Colour secondaryText(){return juce::Colour(0xff9da2a8);}// secondary text
+juce::Colour accent(){return juce::Colour(0xff296095);}       // accent blue
+juce::Colour accentHighlight(){return juce::Colour(0xff69a1d0);} // accent highlight (headers, Mono Maker)
+juce::Colour dim(){return juce::Colour(0xff3a4148);}
 // Manual-EQ per-target colours (item 2): distinct from, but recognisably related to, the
 // STEREO/MID/SIDE button colours above, so a glance at a node/curve tells you which signal it sits on.
 juce::Colour manualStereoColour(){return juce::Colour(0xffc7cdd3);} // off-white/grey, family with white()
@@ -187,7 +205,7 @@ PQContentComponent::PQContentComponent(PQAudioProcessor&x):p(x),presetPanel(x,pr
  siAmt.setTooltip("How strongly the captured reference corrects the Side signal, 0-100%.");
  // Fader glow (per earlier request): track lights up from the left as you drag right, in each
  // slider's own colour where one exists (Stereo/Mid/Side), or a neutral accent otherwise.
- glowWhite.setGlowColour(white()); glowYellow.setGlowColour(yellow()); glowBlue.setGlowColour(blue()); glowAccent.setGlowColour(juce::Colour(0xffbfe0ff));
+ glowWhite.setGlowColour(white()); glowYellow.setGlowColour(yellow()); glowBlue.setGlowColour(blue()); glowAccent.setGlowColour(juce::Colour(0xff69a1d0));
  sAmt.setLookAndFeel(&glowWhite); mAmt.setLookAndFeel(&glowYellow); siAmt.setLookAndFeel(&glowBlue);
  setupSlider(low,20,20000,1);setupSlider(high,20,20000,1);setupSlider(width,0,100,.1);setupSlider(depth,0,200,1);
  for(auto*s:{&low,&high,&width,&depth}) s->setLookAndFeel(&glowAccent);
@@ -198,7 +216,7 @@ PQContentComponent::PQContentComponent(PQAudioProcessor&x):p(x),presetPanel(x,pr
  // Mono Maker: 0% = no effect, 100% = the whole signal collapses to mono. Fixed 24dB/oct slope,
  // always runs after everything else (width included) regardless of PRE/POST - see processBlock.
  setupSlider(monoMaker,0,100,.1); monoMaker.setSliderStyle(juce::Slider::LinearVertical); monoMaker.setTextBoxStyle(juce::Slider::TextBoxBelow,false,60,20);
- glowMono.setGlowColour(juce::Colour(0xffbfe0ff)); monoMaker.setLookAndFeel(&glowMono);
+ glowMono.setGlowColour(juce::Colour(0xff69a1d0)); monoMaker.setLookAndFeel(&glowMono);
  monoMaker.setValue(p.monoMakerAmount.load()*100.0); monoMaker.setDoubleClickReturnValue(true,0.0);
  monoMaker.setTooltip("Collapses Side to mono below a rising cutoff - 0% off, 100% the whole signal goes mono.");
  monoMaker.onValueChange=[this]{ p.monoMakerAmount.store((float)monoMaker.getValue()/100.f); p.manualDirty.store(true); p.presetDirty.store(true); };
@@ -465,12 +483,17 @@ void PQContentComponent::drawVerticalMeter(juce::Graphics&g,juce::Rectangle<floa
  juce::ColourGradient grad(c.withAlpha(.35f),bar.getX(),fillR.getBottom(),
                             t>0.92f?yellow():c.withAlpha(.95f),bar.getX(),fillR.getY(),false);
  g.setGradientFill(grad); g.fillRoundedRectangle(bar,4.f);
- // Peak-hold indicator: a thin line at the highest recent peak, which the processor releases
- // slowly rather than snapping straight to the current level (see PQAudioProcessor::processBlock).
+ // FIX (requested): peak-hold indicator is now a glowing circle instead of a flat dash - matches
+ // the trim rail's dot style so both rails read as the same visual language ("line + glowing dot"),
+ // not one rail with a dot and the other with a plain tick.
  float tp=juce::jlimit(0.f,1.f,(peakDb-kFloorDb)/(kTopDb-kFloorDb));
  float py=fillR.getBottom()-fillR.getHeight()*tp;
- g.setColour(juce::Colours::white.withAlpha(.85f));
- g.fillRect(juce::Rectangle<float>(fillR.getX(),py-0.75f,fillR.getWidth(),1.5f));
+ float cx=fillR.getCentreX(), pr=5.f;
+ juce::Path peakDot; peakDot.addEllipse(cx-pr,py-pr,pr*2.f,pr*2.f);
+ juce::DropShadow peakGlow(c.withAlpha(0.85f),8,juce::Point<int>(0,0));
+ peakGlow.drawForPath(g,peakDot);
+ g.setColour(juce::Colours::white); g.fillEllipse(cx-pr,py-pr,pr*2.f,pr*2.f);
+ g.setColour(c); g.drawEllipse(cx-pr,py-pr,pr*2.f,pr*2.f,1.3f);
 }
 
 // Numbered scale in the gap between the IN/OUT meters (per request) - same +6..-60dB mapping
@@ -744,7 +767,10 @@ void PQContentComponent::paint(juce::Graphics&g){
  // change at all. Pushed the contrast much further - a noticeably lighter cool navy at the top,
  // fading to near-black - plus a soft radial glow seated behind the chart (like a light source),
  // which is what actually reads as "premium" rather than a barely-there tint.
- juce::ColourGradient bgGrad(juce::Colour(0xff1c2530),0,0,juce::Colour(0xff030406),0,(float)getHeight(),false);
+ // FIX (design spec): main window background is exactly rawBg() (#0D1117) per spec - kept as a very
+ // subtle gradient (a touch of raisedPanel() at the top, fading to rawBg()) for depth, rather than
+ // perfectly flat, but now anchored to the actual palette instead of arbitrary tones.
+ juce::ColourGradient bgGrad(raisedPanel(),0,0,rawBg(),0,(float)getHeight(),false);
  g.setGradientFill(bgGrad); g.fillRect(getLocalBounds());
  auto a=getLocalBounds().toFloat();
  {
@@ -759,7 +785,7 @@ void PQContentComponent::paint(juce::Graphics&g){
      juce::Font pqFont(juce::FontOptions(34).withStyle("bold"));
      pqFont=pqFont.withExtraKerningFactor(0.04f);
      g.setFont(pqFont);
-     juce::ColourGradient pqGrad(white(),28,20,juce::Colour(0xffbfe0ff),28,52,false);
+     juce::ColourGradient pqGrad(white(),28,20,juce::Colour(0xff69a1d0),28,52,false);
      g.setGradientFill(pqGrad);
      g.drawText("PQ",28,18,66,36,juce::Justification::left);
  }
@@ -774,14 +800,14 @@ void PQContentComponent::paint(juce::Graphics&g){
  auto chart=chartFull;
  // Drop shadow under the analyzer panel, drawn before the panel itself so the panel sits on top of it.
  {
-     juce::Path chartShadowPath; chartShadowPath.addRoundedRectangle(chart,14.f);
+     juce::Path chartShadowPath; chartShadowPath.addRoundedRectangle(chart,12.f);
      juce::DropShadow shadow(juce::Colours::black.withAlpha(0.55f), 18, juce::Point<int>(0,7));
      shadow.drawForPath(g, chartShadowPath);
  }
- g.setColour(panel());g.fillRoundedRectangle(chart,14);for(int i=1;i<12;i++){float x=chart.getX()+chart.getWidth()*i/12;g.setColour(grid());g.drawVerticalLine((int)x,chart.getY(),chart.getBottom());}
+ g.setColour(panel());g.fillRoundedRectangle(chart,12);for(int i=1;i<12;i++){float x=chart.getX()+chart.getWidth()*i/12;g.setColour(grid());g.drawVerticalLine((int)x,chart.getY(),chart.getBottom());}
  // FIX (raised edge, per request): a defined border stroke instead of relying only on the drop
  // shadow - this is what actually reads as a distinct "raised panel" edge rather than a soft fade.
- g.setColour(juce::Colour(0xff3a4148).withAlpha(0.85f)); g.drawRoundedRectangle(chart,14.f,1.4f);
+ g.setColour(grid().withAlpha(0.7f)); g.drawRoundedRectangle(chart,12.f,1.f);
  chartArea=chart; // remembered for mouseDown/Drag/Up hit-testing and coordinate mapping
  drawFreqDbAxis(g,chart); // horizontal dB gridlines (replaces the old un-labelled 7-line grid) + extra freq labels
  drawRangeMask(g,chart);
@@ -791,7 +817,7 @@ void PQContentComponent::paint(juce::Graphics&g){
  // corners - most visibly at the top-left, since that's the tightest corner relative to typical
  // curve shapes. Clipping to the same rounded-rect path the panel itself is filled with guarantees
  // nothing can ever visually escape it, regardless of the underlying data.
- juce::Path chartClip; chartClip.addRoundedRectangle(chart,14.f);
+ juce::Path chartClip; chartClip.addRoundedRectangle(chart,12.f);
  g.saveState(); g.reduceClipRegion(chartClip);
  // Subtle brand watermark - low enough alpha to read as texture, not compete with the curves drawn
  // on top of it. Bottom-right corner, same spot most plugins tuck their mark into.
@@ -828,28 +854,41 @@ void PQContentComponent::paint(juce::Graphics&g){
      // oversized panel, leaving visible dead space below their own (much shorter) content. Both
      // numbers below are now sized to what Mono Maker actually needs, and the panel height is
      // derived directly from that instead of a separate guessed constant.
-     const float monoBoxW=150.f, monoBoxH=170.f;
+     const float monoBoxW=150.f, monoBoxH=150.f;
      const float ctrlPanelH=10.f+monoBoxH+14.f+30.f+20.f; // top pad + box + gap + button row + bottom pad
      auto ctrlPanel=juce::Rectangle<float>(24.f,chart.getBottom()+32.f,a.getWidth()-48.f,ctrlPanelH);
      // FIX (raised/beveled edges, per request): darker base face offset down + gradient front face +
      // top sheen (unchanged), PLUS a real border stroke now - this is what actually reads as a
      // defined, "premium" edge instead of just a soft gradient fading into the background.
      g.setColour(juce::Colours::black.withAlpha(0.45f));
-     g.fillRoundedRectangle(ctrlPanel.translated(0.f,5.f),14.f);
+     g.fillRoundedRectangle(ctrlPanel.translated(0.f,5.f),16.f);
      auto face=ctrlPanel.withTrimmedBottom(5.f);
-     juce::ColourGradient panelGrad(juce::Colour(0xff141a22),face.getX(),face.getY(),juce::Colour(0xff0c0f14),face.getX(),face.getBottom(),false);
-     g.setGradientFill(panelGrad); g.fillRoundedRectangle(face,14.f);
-     juce::Path facePath2; facePath2.addRoundedRectangle(face,14.f);
+     juce::ColourGradient panelGrad(juce::Colour(0xff1d2633),face.getX(),face.getY(),juce::Colour(0xff141b25),face.getX(),face.getBottom(),false);
+     g.setGradientFill(panelGrad); g.fillRoundedRectangle(face,16.f);
+     juce::Path facePath2; facePath2.addRoundedRectangle(face,16.f);
      g.saveState(); g.reduceClipRegion(facePath2);
      g.setColour(juce::Colours::white.withAlpha(0.035f)); g.fillRect(face.withHeight(face.getHeight()*0.3f));
      g.restoreState();
-     g.setColour(juce::Colour(0xff3a4148).withAlpha(0.85f)); g.drawRoundedRectangle(face.reduced(0.5f),14.f,1.4f);
+     g.setColour(grid().withAlpha(0.7f)); g.drawRoundedRectangle(face.reduced(0.5f),16.f,1.f);
+     // FIX (spotlight glow near CAPTURE/APPLY/CLEAR, per reference): a soft radial light pooled
+     // around the button row, fading outward - clipped to the panel so it never spills past its
+     // rounded edge. Purely decorative, sits behind the actual button components.
+     {
+         float btnCenterY=chart.getBottom()+42.f+monoBoxH+14.f+15.f; // vertical middle of the button row
+         float btnCenterX=monoBoxX+80.f;
+         juce::Path glowClip; glowClip.addRoundedRectangle(face,16.f);
+         g.saveState(); g.reduceClipRegion(glowClip);
+         juce::ColourGradient spotlight(juce::Colour(0xff69a1d0).withAlpha(0.09f),btnCenterX,btnCenterY,
+                                         juce::Colour(0xff69a1d0).withAlpha(0.f),btnCenterX+220.f,btnCenterY,true);
+         g.setGradientFill(spotlight); g.fillRect(face);
+         g.restoreState();
+     }
  }
  // FIX (layout, per reference mockup): Mono Maker moves out to its own vertical box on the far left
  // (matching the reference exactly) - everything else reorganizes into four bordered zones (MATCH
  // AMOUNT / FREQUENCY RANGE / STEREOIZATION / WIDTH AMT) with thin divider lines between them and
  // accent-coloured headers, instead of the previous two wide, loosely-related columns.
- const float monoBoxX=42.f, monoBoxW=150.f, monoBoxH=170.f, panelGap=24.f;
+ const float monoBoxX=42.f, monoBoxW=150.f, monoBoxH=150.f, panelGap=24.f;
  const float panelX=monoBoxX+monoBoxW+panelGap;
  const float panelRight=a.getWidth()-42.f;
  const float panelW=panelRight-panelX;
@@ -859,20 +898,20 @@ void PQContentComponent::paint(juce::Graphics&g){
  const float sliderIndent=75.f; // room for the row label before the slider starts, within zone1
  const float matchSliderW=zone1W-sliderIndent-8.f;
  int y=(int)chart.getBottom()+70;
- const juce::Colour accent(0xffbfe0ff);
- label(g,"MATCH AMOUNT",{zone1X,chart.getBottom()+47,150,18},accent);
- label(g,"FREQUENCY RANGE",{zone2X,chart.getBottom()+47,180,18},accent);
- label(g,"STEREOIZATION",{zone3X,chart.getBottom()+47,180,18},accent);
+ const juce::Colour& accentHi = accentHighlight(); // local alias, avoids shadowing the global accent() (base accent, different colour)
+ label(g,"MATCH AMOUNT",{zone1X,chart.getBottom()+47,150,18},accentHi);
+ label(g,"FREQUENCY RANGE",{zone2X,chart.getBottom()+47,180,18},accentHi);
+ label(g,"STEREOIZATION",{zone3X,chart.getBottom()+47,180,18},accentHi);
  // Thin divider lines between zones, matching the reference's separated-columns look. Bottom now
  // tracks Mono Maker's (shorter) box height instead of a leftover taller constant.
  g.setColour(grid());
  for(float dx:{zone1X+zone1W+zoneGap*0.5f, zone2X+zoneW+zoneGap*0.5f, zone3X+zoneW+zoneGap*0.5f})
      g.drawLine(dx,chart.getBottom()+44.f,dx,chart.getBottom()+42.f+monoBoxH,1.f);
  const float matchSliderX=zone1X+sliderIndent;
- label(g,"STEREO",{zone1X+3,(float)y+2,80,18},white()); label(g,"MID",{zone1X+3,(float)y+44,80,18},yellow()); label(g,"SIDE",{zone1X+3,(float)y+86,80,18},blue());
- label(g,"LOW HZ",{zone2X,(float)y+2,100,18},muted()); label(g,"HIGH HZ",{zone2X,(float)y+50,100,18},muted());
- label(g,"MODE",{zone3X,(float)y+2,100,18},muted()); label(g,"STAGE",{zone3X,(float)y+50,100,18},muted());
- label(g,"WIDTH AMT",{zone4X,(float)y+2,100,18},muted()); label(g,"DEPTH %",{zone4X,(float)y+50,100,18},muted());
+ label(g,"STEREO",{zone1X+3,(float)y+2,80,18},white()); label(g,"MID",{zone1X+3,(float)y+38,80,18},yellow()); label(g,"SIDE",{zone1X+3,(float)y+74,80,18},blue());
+ label(g,"LOW HZ",{zone2X,(float)y+2,100,18},muted()); label(g,"HIGH HZ",{zone2X,(float)y+44,100,18},muted());
+ label(g,"MODE",{zone3X,(float)y+2,100,18},muted()); label(g,"STAGE",{zone3X,(float)y+44,100,18},muted());
+ label(g,"WIDTH AMT",{zone4X,(float)y+2,100,18},muted()); label(g,"DEPTH %",{zone4X,(float)y+44,100,18},muted());
  // Mono Maker's own vertical box, far left - now sized to its actual content (label + fader + value
  // box) instead of an arbitrary taller height - beveled the same way as the main panel, with a
  // brighter/thicker accent border so it reads as clearly "raised" per the request.
@@ -881,22 +920,22 @@ void PQContentComponent::paint(juce::Graphics&g){
      g.setColour(juce::Colours::black.withAlpha(0.4f));
      g.fillRoundedRectangle(monoBox.translated(0.f,4.f),10.f);
      auto monoFace=monoBox.withTrimmedBottom(4.f);
-     juce::ColourGradient monoGrad(juce::Colour(0xff141a22),monoFace.getX(),monoFace.getY(),juce::Colour(0xff0c0f14),monoFace.getX(),monoFace.getBottom(),false);
+     juce::ColourGradient monoGrad(juce::Colour(0xff1d2633),monoFace.getX(),monoFace.getY(),juce::Colour(0xff141b25),monoFace.getX(),monoFace.getBottom(),false);
      g.setGradientFill(monoGrad); g.fillRoundedRectangle(monoFace,10.f);
-     g.setColour(accent.withAlpha(0.65f)); g.drawRoundedRectangle(monoFace.reduced(0.75f),10.f,1.6f);
-     label(g,"MONO MAKER",{monoBoxX,chart.getBottom()+52.f,monoBoxW,18},accent);
+     g.setColour(accentHi.withAlpha(0.65f)); g.drawRoundedRectangle(monoFace.reduced(0.75f),10.f,1.6f);
+     label(g,"MONO MAKER",{monoBoxX,chart.getBottom()+52.f,monoBoxW,18},accentHi);
  }
  // FIX (two-rail meter style, per reference): each side (IN/OUT) is now a thin plain "trim" rail
  // (just the fader dot, no fill - matches the reference exactly) next to a separate, slightly wider
  // "level" rail (the actual glowing fill bar). Previously these were overlaid on the same rect, which
  // is why the trim fader and the level bar always looked like they were fighting each other visually.
  {
-     juce::Path mpShadowPath; mpShadowPath.addRoundedRectangle(meterPanel,14.f);
+     juce::Path mpShadowPath; mpShadowPath.addRoundedRectangle(meterPanel,12.f);
      juce::DropShadow mpShadow(juce::Colours::black.withAlpha(0.5f),14,juce::Point<int>(0,5));
      mpShadow.drawForPath(g,mpShadowPath);
      juce::ColourGradient mpGrad(juce::Colour(0xff161c25),meterPanel.getX(),meterPanel.getY(),juce::Colour(0xff0a0d12),meterPanel.getX(),meterPanel.getBottom(),false);
-     g.setGradientFill(mpGrad); g.fillRoundedRectangle(meterPanel,14.f);
-     g.setColour(juce::Colour(0xff3a4148).withAlpha(0.85f)); g.drawRoundedRectangle(meterPanel.reduced(0.5f),14.f,1.4f);
+     g.setGradientFill(mpGrad); g.fillRoundedRectangle(meterPanel,12.f);
+     g.setColour(grid().withAlpha(0.85f)); g.drawRoundedRectangle(meterPanel.reduced(0.5f),12.f,1.f);
  }
  auto mp=meterPanel.reduced(10.f);
  mp.removeFromTop(18.f); // room for the IN/OUT labels
@@ -916,7 +955,7 @@ void PQContentComponent::paint(juce::Graphics&g){
      g.drawText("OUT",outGroupFull.withY(outGroupFull.getY()-16).withHeight(14),juce::Justification::centred);
      // Plain trim rail background - just a thin track; the actual draggable dot is the real
      // inputTrim/outputTrim JUCE Slider components, painted on top of this automatically.
-     auto drawTrimRailBg=[&](juce::Rectangle<float> r){ float cx=r.getCentreX(); g.setColour(juce::Colour(0xff242a31)); g.fillRoundedRectangle(cx-1.5f,r.getY(),3.f,r.getHeight(),1.5f); };
+     auto drawTrimRailBg=[&](juce::Rectangle<float> r){ float cx=r.getCentreX(); g.setColour(juce::Colour(0xff313942)); g.fillRoundedRectangle(cx-1.5f,r.getY(),3.f,r.getHeight(),1.5f); };
      drawTrimRailBg(inTrimRail); drawTrimRailBg(outTrimRail);
      drawVerticalMeter(g,inLevelRail,p.inputRmsDb.load(),p.inputPeakDb.load(),white());
      drawVerticalMeter(g,outLevelRail,p.outputRmsDb.load(),p.outputPeakDb.load(),blue());
@@ -960,7 +999,7 @@ void PQContentComponent::resized(){auto a=getLocalBounds();
  int y=chart.getBottom()+70;
  // FIX (layout, per reference mockup - matches paint()): Mono Maker's own (now compact) box on the
  // far left, four bordered zones (MATCH AMOUNT/FREQUENCY RANGE/STEREOIZATION/WIDTH AMT) to its right.
- const float monoBoxX=42.f, monoBoxW=150.f, monoBoxH=170.f, panelGap=24.f;
+ const float monoBoxX=42.f, monoBoxW=150.f, monoBoxH=150.f, panelGap=24.f;
  const float panelX=monoBoxX+monoBoxW+panelGap;
  const float panelRight=(float)a.getWidth()-42.f;
  const float panelW=panelRight-panelX;
@@ -971,11 +1010,11 @@ void PQContentComponent::resized(){auto a=getLocalBounds();
  const float matchSliderW=zone1W-sliderIndent-8.f;
  const float matchSliderX=zone1X+sliderIndent;
  const float zoneCtrlW=zoneW-8.f;
- sAmt.setBounds((int)matchSliderX,y,(int)matchSliderW,22);mAmt.setBounds((int)matchSliderX,y+42,(int)matchSliderW,22);siAmt.setBounds((int)matchSliderX,y+84,(int)matchSliderW,22);
- low.setBounds((int)zone2X,y+18,(int)zoneCtrlW,22);high.setBounds((int)zone2X,y+66,(int)zoneCtrlW,22);
+ sAmt.setBounds((int)matchSliderX,y,(int)matchSliderW,22);mAmt.setBounds((int)matchSliderX,y+38,(int)matchSliderW,22);siAmt.setBounds((int)matchSliderX,y+74,(int)matchSliderW,22);
+ low.setBounds((int)zone2X,y+18,(int)zoneCtrlW,22);high.setBounds((int)zone2X,y+60,(int)zoneCtrlW,22);
  // Mono Maker: vertical fader inside its own (now compact) box - 100px of actual track + 20px for
  // the built-in TextBoxBelow value readout, starting right under the "MONO MAKER" header.
- monoMaker.setBounds((int)(monoBoxX+(monoBoxW-50.f)/2.f),(int)chart.getBottom()+76,50,120);
+ monoMaker.setBounds((int)(monoBoxX+(monoBoxW-50.f)/2.f),(int)chart.getBottom()+76,50,100);
  // FIX (two-rail meter groups, per reference - matches paint()): each side is now a thin trim rail
  // (just the fader dot) next to a separate, slightly wider level rail (the glowing fill bar), instead
  // of both overlaid on the same rect.
@@ -995,8 +1034,8 @@ void PQContentComponent::resized(){auto a=getLocalBounds();
      inputTrim.setBounds(inTrimRail.toNearestInt()); outputTrim.setBounds(outTrimRail.toNearestInt());
      matchGainBtn.setBounds(btnRow.toNearestInt());
  }
- mode.setBounds((int)zone3X,y+18,(int)zoneCtrlW,25);widthStage.setBounds((int)zone3X,y+66,(int)zoneCtrlW,25);
- width.setBounds((int)zone4X,y+18,(int)zoneCtrlW,25);depth.setBounds((int)zone4X,y+66,(int)zoneCtrlW,25);
+ mode.setBounds((int)zone3X,y+18,(int)zoneCtrlW,25);widthStage.setBounds((int)zone3X,y+60,(int)zoneCtrlW,25);
+ width.setBounds((int)zone4X,y+18,(int)zoneCtrlW,25);depth.setBounds((int)zone4X,y+60,(int)zoneCtrlW,25);
  // Buttons now sit directly under the (now compact) Mono Maker box, matching the reference's layout.
  const int btnY=(int)chart.getBottom()+42+(int)monoBoxH+14;
  capture.setBounds((int)monoBoxX,btnY,68,30);apply.setBounds((int)monoBoxX+74,btnY,62,30);clear.setBounds((int)monoBoxX+142,btnY,58,30);
