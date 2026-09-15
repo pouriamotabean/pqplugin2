@@ -822,7 +822,7 @@ void PQContentComponent::paint(juce::Graphics&g){
  // Subtle brand watermark - low enough alpha to read as texture, not compete with the curves drawn
  // on top of it. Bottom-right corner, same spot most plugins tuck their mark into.
  {
-     g.setColour(juce::Colours::white.withAlpha(0.035f));
+     g.setColour(juce::Colours::white.withAlpha(0.06f));
      g.setFont(juce::FontOptions(72).withStyle("bold"));
      g.drawText("PQ",chart.reduced(18.f),juce::Justification::bottomRight);
  }
@@ -857,30 +857,50 @@ void PQContentComponent::paint(juce::Graphics&g){
      const float monoBoxX=42.f, monoBoxW=150.f, monoBoxH=150.f;
      const float ctrlPanelH=10.f+monoBoxH+14.f+30.f+20.f; // top pad + box + gap + button row + bottom pad
      auto ctrlPanel=juce::Rectangle<float>(24.f,chart.getBottom()+32.f,a.getWidth()-48.f,ctrlPanelH);
-     // FIX (raised/beveled edges, per request): darker base face offset down + gradient front face +
-     // top sheen (unchanged), PLUS a real border stroke now - this is what actually reads as a
-     // defined, "premium" edge instead of just a soft gradient fading into the background.
-     g.setColour(juce::Colours::black.withAlpha(0.45f));
-     g.fillRoundedRectangle(ctrlPanel.translated(0.f,5.f),16.f);
-     auto face=ctrlPanel.withTrimmedBottom(5.f);
-     juce::ColourGradient panelGrad(juce::Colour(0xff1d2633),face.getX(),face.getY(),juce::Colour(0xff141b25),face.getX(),face.getBottom(),false);
-     g.setGradientFill(panelGrad); g.fillRoundedRectangle(face,16.f);
-     juce::Path facePath2; facePath2.addRoundedRectangle(face,16.f);
-     g.saveState(); g.reduceClipRegion(facePath2);
-     g.setColour(juce::Colours::white.withAlpha(0.035f)); g.fillRect(face.withHeight(face.getHeight()*0.3f));
+     // FIX (sculpted bottom-edge cutout, per spec): this used to be a plain rounded rectangle with a
+     // painted-on shadow/highlight for "depth". The panel's actual silhouette now has a smooth,
+     // large-radius concave cutout carved into the bottom edge under the CAPTURE/APPLY/CLEAR button
+     // area - built as one continuous Path (straight edges + quarter-circle corners + a cubic Bezier
+     // transition), not a rectangle with something painted over it. Every layer below (shadow, fill,
+     // border, clip regions for the sheen/spotlight) traces this exact same silhouette, so nothing
+     // ever pokes out past the carved edge.
+     juce::Path panelPath;
+     {
+         constexpr float pi=juce::MathConstants<float>::pi;
+         const float cornerR=16.f;
+         const float carveRise=10.f;                        // subtle - how much shorter the carved section is
+         const float carveFlatEnd=monoBoxX+monoBoxW+90.f;    // right edge of the flat carved shelf - comfortably past CLEAR's right edge
+         const float carveXEnd=carveFlatEnd+180.f;           // where the curve finishes and rejoins the normal edge
+         float left=ctrlPanel.getX(), top=ctrlPanel.getY(), right=ctrlPanel.getRight();
+         float yNormal=ctrlPanel.getBottom(), yCarved=yNormal-carveRise;
+         panelPath.startNewSubPath(left, top+cornerR);
+         panelPath.addArc(left, top, cornerR*2.f, cornerR*2.f, pi*1.5f, pi*2.f, false);                              // top-left
+         panelPath.addArc(right-cornerR*2.f, top, cornerR*2.f, cornerR*2.f, 0.f, pi*0.5f, false);                    // top-right
+         panelPath.addArc(right-cornerR*2.f, yNormal-cornerR*2.f, cornerR*2.f, cornerR*2.f, pi*0.5f, pi, false);     // bottom-right (normal height)
+         panelPath.lineTo(carveXEnd, yNormal);                                                                        // flat bottom edge, right portion
+         panelPath.cubicTo(carveXEnd-90.f, yNormal, carveFlatEnd+90.f, yCarved, carveFlatEnd, yCarved);               // the carve itself
+         panelPath.lineTo(left+cornerR, yCarved);                                                                     // flat carved shelf
+         panelPath.addArc(left, yCarved-cornerR*2.f, cornerR*2.f, cornerR*2.f, pi, pi*1.5f, false);                  // bottom-left (carved height)
+         panelPath.closeSubPath();
+     }
+     juce::DropShadow panelShadow(juce::Colours::black.withAlpha(0.55f),16,juce::Point<int>(0,6));
+     panelShadow.drawForPath(g,panelPath);
+     juce::ColourGradient panelGrad(juce::Colour(0xff1d2633),ctrlPanel.getX(),ctrlPanel.getY(),juce::Colour(0xff141b25),ctrlPanel.getX(),ctrlPanel.getBottom(),false);
+     g.setGradientFill(panelGrad); g.fillPath(panelPath);
+     g.saveState(); g.reduceClipRegion(panelPath);
+     g.setColour(juce::Colours::white.withAlpha(0.06f)); g.fillRect(ctrlPanel.withHeight(ctrlPanel.getHeight()*0.3f));
      g.restoreState();
-     g.setColour(grid().withAlpha(0.7f)); g.drawRoundedRectangle(face.reduced(0.5f),16.f,1.f);
+     g.setColour(grid().withAlpha(0.7f)); g.strokePath(panelPath,juce::PathStrokeType(1.f));
      // FIX (spotlight glow near CAPTURE/APPLY/CLEAR, per reference): a soft radial light pooled
-     // around the button row, fading outward - clipped to the panel so it never spills past its
-     // rounded edge. Purely decorative, sits behind the actual button components.
+     // around the button row, fading outward - clipped to the panel's actual (now carved) silhouette
+     // so it never spills past the real edge. Purely decorative, sits behind the actual buttons.
      {
          float btnCenterY=chart.getBottom()+42.f+monoBoxH+14.f+15.f; // vertical middle of the button row
          float btnCenterX=monoBoxX+80.f;
-         juce::Path glowClip; glowClip.addRoundedRectangle(face,16.f);
-         g.saveState(); g.reduceClipRegion(glowClip);
+         g.saveState(); g.reduceClipRegion(panelPath);
          juce::ColourGradient spotlight(juce::Colour(0xff69a1d0).withAlpha(0.09f),btnCenterX,btnCenterY,
                                          juce::Colour(0xff69a1d0).withAlpha(0.f),btnCenterX+220.f,btnCenterY,true);
-         g.setGradientFill(spotlight); g.fillRect(face);
+         g.setGradientFill(spotlight); g.fillRect(ctrlPanel);
          g.restoreState();
      }
  }
@@ -932,11 +952,17 @@ void PQContentComponent::paint(juce::Graphics&g){
      {
          auto b=monoFace.reduced(0.75f);
          float inset=b.getWidth()*0.15f;
-         g.setColour(accentHi.withAlpha(0.65f));
-         g.drawLine(b.getX(),b.getY(),b.getX(),b.getBottom(),1.6f);
-         g.drawLine(b.getRight(),b.getY(),b.getRight(),b.getBottom(),1.6f);
-         g.drawLine(b.getX()+inset,b.getY(),b.getRight()-inset,b.getY(),1.6f);
-         g.drawLine(b.getX()+inset,b.getBottom(),b.getRight()-inset,b.getBottom(),1.6f);
+         const float cornerR=10.f; // matches monoFace's own fillRoundedRectangle radius above
+         g.setColour(blueLight().withAlpha(0.95f));
+         // FIX (corner mismatch): verticals now stop cornerR short of the top/bottom instead of
+         // running the full straight-cornered height - the fill beneath has ROUNDED corners, so a
+         // straight line running all the way to the corner stuck out past that curve, visibly
+         // clashing with it. Stopping short of the curve entirely (rather than trying to match the
+         // curve exactly) keeps every straight segment cleanly inside the fill's straight edges.
+         g.drawLine(b.getX(),b.getY()+cornerR,b.getX(),b.getBottom()-cornerR,2.2f);
+         g.drawLine(b.getRight(),b.getY()+cornerR,b.getRight(),b.getBottom()-cornerR,2.2f);
+         g.drawLine(b.getX()+inset,b.getY(),b.getRight()-inset,b.getY(),2.2f);
+         g.drawLine(b.getX()+inset,b.getBottom(),b.getRight()-inset,b.getBottom(),2.2f);
      }
      // FIX (requested): label turns yellow (MID's colour - matches the fader's own accent look less
      // literally, but is what was asked for) and is centred exactly above the fader, not left-aligned
