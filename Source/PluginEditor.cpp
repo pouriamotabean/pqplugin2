@@ -476,11 +476,15 @@ void PQContentComponent::drawVerticalMeter(juce::Graphics&g,juce::Rectangle<floa
 // Numbered scale in the gap between the IN/OUT meters (per request) - same +6..-60dB mapping
 // drawVerticalMeter uses internally (including its 4px inset), so a tick here lines up exactly with
 // the real level it's labelling on both bars.
-void PQContentComponent::drawMeterDbScale(juce::Graphics& g, juce::Rectangle<float> leftMeter, juce::Rectangle<float> rightMeter){
+// Numbered scale in the gap between the IN/OUT meter groups (per request) - same +6..-60dB mapping
+// drawVerticalMeter uses internally (including its 4px inset), so a tick here lines up exactly with
+// the real level it's labelling. Takes the scale gap rect directly (rather than inferring it from
+// meter positions) since each side is now a two-rail group, not a single rect.
+void PQContentComponent::drawMeterDbScale(juce::Graphics& g, juce::Rectangle<float> scaleArea, juce::Rectangle<float> referenceMeterForHeight){
     constexpr float kFloorDb=-60.f, kTopDb=6.f;
-    auto fillR=leftMeter.reduced(4.f); // both meters share the same vertical extent
+    auto fillR=referenceMeterForHeight.reduced(4.f); // both meters share the same vertical extent
     static const float ticks[]={6.f,3.f,0.f,-3.f,-6.f,-12.f,-18.f,-24.f,-36.f,-48.f,-60.f};
-    float cx=(leftMeter.getRight()+rightMeter.getX())*0.5f;
+    float cx=scaleArea.getCentreX();
     g.setFont(juce::FontOptions(8.5f));
     for(float db:ticks){
         float t=juce::jlimit(0.f,1.f,(db-kFloorDb)/(kTopDb-kFloorDb));
@@ -765,7 +769,7 @@ void PQContentComponent::paint(juce::Graphics&g){
  // those living down in the "FREQUENCY RANGE" box. Split identically in resized() below, since that's
  // where the actual meter/trim/button components get their bounds.
  auto chartFull=a.reduced(24,72).withHeight(a.getHeight()*.48f);
- auto meterPanel=chartFull.removeFromRight(150.f);
+ auto meterPanel=chartFull.removeFromRight(180.f);
  chartFull.removeFromRight(16.f); // gap between chart and meter panel
  auto chart=chartFull;
  // Drop shadow under the analyzer panel, drawn before the panel itself so the panel sits on top of it.
@@ -775,6 +779,9 @@ void PQContentComponent::paint(juce::Graphics&g){
      shadow.drawForPath(g, chartShadowPath);
  }
  g.setColour(panel());g.fillRoundedRectangle(chart,14);for(int i=1;i<12;i++){float x=chart.getX()+chart.getWidth()*i/12;g.setColour(grid());g.drawVerticalLine((int)x,chart.getY(),chart.getBottom());}
+ // FIX (raised edge, per request): a defined border stroke instead of relying only on the drop
+ // shadow - this is what actually reads as a distinct "raised panel" edge rather than a soft fade.
+ g.setColour(juce::Colour(0xff3a4148).withAlpha(0.85f)); g.drawRoundedRectangle(chart,14.f,1.4f);
  chartArea=chart; // remembered for mouseDown/Drag/Up hit-testing and coordinate mapping
  drawFreqDbAxis(g,chart); // horizontal dB gridlines (replaces the old un-labelled 7-line grid) + extra freq labels
  drawRangeMask(g,chart);
@@ -815,11 +822,18 @@ void PQContentComponent::paint(juce::Graphics&g){
  label(g,"20 Hz",{chart.getX(),chart.getBottom()-18,60,18},muted());label(g,"1 kHz",{chart.getCentreX()-25,chart.getBottom()-18,50,18},muted());label(g,"20 kHz",{chart.getRight()-60,chart.getBottom()-18,60,18},muted());
  label(g,"CLICK: ADD BAND   RIGHT-CLICK: TYPE+TARGET/DELETE   DRAG: FREQ+GAIN   SCROLL: Q   DEL: REMOVE SELECTED",{chart.getX(),chart.getY()-16,700,14},muted());
  {
-     // FIX (console/beveled look, per reference): a darker "base" face offset down a few px behind
-     // the main gradient face, plus a faint light sheen along the very top - same trick used on the
-     // buttons (see ConsoleButtonLookAndFeel) - gives the panel a sense of physical thickness instead
-     // of reading as a flat rectangle.
-     auto ctrlPanel=juce::Rectangle<float>(24.f,chart.getBottom()+32.f,a.getWidth()-48.f,a.getHeight()-chart.getBottom()-56.f);
+     // FIX (compact Mono Maker + panel height, per feedback): the panel used to be sized to fit a
+     // tall Mono Maker box (204px) that had far more empty space in it than its actual content
+     // (label+fader+value) needed - and every OTHER zone was then forced to sit inside that same
+     // oversized panel, leaving visible dead space below their own (much shorter) content. Both
+     // numbers below are now sized to what Mono Maker actually needs, and the panel height is
+     // derived directly from that instead of a separate guessed constant.
+     const float monoBoxW=150.f, monoBoxH=170.f;
+     const float ctrlPanelH=10.f+monoBoxH+14.f+30.f+20.f; // top pad + box + gap + button row + bottom pad
+     auto ctrlPanel=juce::Rectangle<float>(24.f,chart.getBottom()+32.f,a.getWidth()-48.f,ctrlPanelH);
+     // FIX (raised/beveled edges, per request): darker base face offset down + gradient front face +
+     // top sheen (unchanged), PLUS a real border stroke now - this is what actually reads as a
+     // defined, "premium" edge instead of just a soft gradient fading into the background.
      g.setColour(juce::Colours::black.withAlpha(0.45f));
      g.fillRoundedRectangle(ctrlPanel.translated(0.f,5.f),14.f);
      auto face=ctrlPanel.withTrimmedBottom(5.f);
@@ -829,12 +843,13 @@ void PQContentComponent::paint(juce::Graphics&g){
      g.saveState(); g.reduceClipRegion(facePath2);
      g.setColour(juce::Colours::white.withAlpha(0.035f)); g.fillRect(face.withHeight(face.getHeight()*0.3f));
      g.restoreState();
+     g.setColour(juce::Colour(0xff3a4148).withAlpha(0.85f)); g.drawRoundedRectangle(face.reduced(0.5f),14.f,1.4f);
  }
  // FIX (layout, per reference mockup): Mono Maker moves out to its own vertical box on the far left
  // (matching the reference exactly) - everything else reorganizes into four bordered zones (MATCH
  // AMOUNT / FREQUENCY RANGE / STEREOIZATION / WIDTH AMT) with thin divider lines between them and
  // accent-coloured headers, instead of the previous two wide, loosely-related columns.
- const float monoBoxX=42.f, monoBoxW=210.f, panelGap=24.f;
+ const float monoBoxX=42.f, monoBoxW=150.f, monoBoxH=170.f, panelGap=24.f;
  const float panelX=monoBoxX+monoBoxW+panelGap;
  const float panelRight=a.getWidth()-42.f;
  const float panelW=panelRight-panelX;
@@ -848,50 +863,68 @@ void PQContentComponent::paint(juce::Graphics&g){
  label(g,"MATCH AMOUNT",{zone1X,chart.getBottom()+47,150,18},accent);
  label(g,"FREQUENCY RANGE",{zone2X,chart.getBottom()+47,180,18},accent);
  label(g,"STEREOIZATION",{zone3X,chart.getBottom()+47,180,18},accent);
- // Thin divider lines between zones, matching the reference's separated-columns look.
+ // Thin divider lines between zones, matching the reference's separated-columns look. Bottom now
+ // tracks Mono Maker's (shorter) box height instead of a leftover taller constant.
  g.setColour(grid());
  for(float dx:{zone1X+zone1W+zoneGap*0.5f, zone2X+zoneW+zoneGap*0.5f, zone3X+zoneW+zoneGap*0.5f})
-     g.drawLine(dx,chart.getBottom()+44.f,dx,(float)y+150.f,1.f);
+     g.drawLine(dx,chart.getBottom()+44.f,dx,chart.getBottom()+42.f+monoBoxH,1.f);
  const float matchSliderX=zone1X+sliderIndent;
  label(g,"STEREO",{zone1X+3,(float)y+2,80,18},white()); label(g,"MID",{zone1X+3,(float)y+44,80,18},yellow()); label(g,"SIDE",{zone1X+3,(float)y+86,80,18},blue());
  label(g,"LOW HZ",{zone2X,(float)y+2,100,18},muted()); label(g,"HIGH HZ",{zone2X,(float)y+50,100,18},muted());
  label(g,"MODE",{zone3X,(float)y+2,100,18},muted()); label(g,"STAGE",{zone3X,(float)y+50,100,18},muted());
  label(g,"WIDTH AMT",{zone4X,(float)y+2,100,18},muted()); label(g,"DEPTH %",{zone4X,(float)y+50,100,18},muted());
- // Mono Maker's own vertical box, far left - beveled the same way as the main panel, framed in the
- // accent colour so it reads as a distinct feature rather than one more slider.
+ // Mono Maker's own vertical box, far left - now sized to its actual content (label + fader + value
+ // box) instead of an arbitrary taller height - beveled the same way as the main panel, with a
+ // brighter/thicker accent border so it reads as clearly "raised" per the request.
  {
-     juce::Rectangle<float> monoBox(monoBoxX,chart.getBottom()+42.f,monoBoxW,204.f);
+     juce::Rectangle<float> monoBox(monoBoxX,chart.getBottom()+42.f,monoBoxW,monoBoxH);
      g.setColour(juce::Colours::black.withAlpha(0.4f));
      g.fillRoundedRectangle(monoBox.translated(0.f,4.f),10.f);
      auto monoFace=monoBox.withTrimmedBottom(4.f);
      juce::ColourGradient monoGrad(juce::Colour(0xff141a22),monoFace.getX(),monoFace.getY(),juce::Colour(0xff0c0f14),monoFace.getX(),monoFace.getBottom(),false);
      g.setGradientFill(monoGrad); g.fillRoundedRectangle(monoFace,10.f);
-     g.setColour(accent.withAlpha(0.45f)); g.drawRoundedRectangle(monoFace.reduced(0.75f),10.f,1.3f);
+     g.setColour(accent.withAlpha(0.65f)); g.drawRoundedRectangle(monoFace.reduced(0.75f),10.f,1.6f);
      label(g,"MONO MAKER",{monoBoxX,chart.getBottom()+52.f,monoBoxW,18},accent);
  }
- // FIX (layout - meters relocated beside the chart, per the reference): its own small panel, with
- // the same shadow+gradient treatment as the main chart/control panels, sitting directly right of
- // the analyzer instead of buried in the bottom "FREQUENCY RANGE" box.
+ // FIX (two-rail meter style, per reference): each side (IN/OUT) is now a thin plain "trim" rail
+ // (just the fader dot, no fill - matches the reference exactly) next to a separate, slightly wider
+ // "level" rail (the actual glowing fill bar). Previously these were overlaid on the same rect, which
+ // is why the trim fader and the level bar always looked like they were fighting each other visually.
  {
      juce::Path mpShadowPath; mpShadowPath.addRoundedRectangle(meterPanel,14.f);
      juce::DropShadow mpShadow(juce::Colours::black.withAlpha(0.5f),14,juce::Point<int>(0,5));
      mpShadow.drawForPath(g,mpShadowPath);
      juce::ColourGradient mpGrad(juce::Colour(0xff161c25),meterPanel.getX(),meterPanel.getY(),juce::Colour(0xff0a0d12),meterPanel.getX(),meterPanel.getBottom(),false);
      g.setGradientFill(mpGrad); g.fillRoundedRectangle(meterPanel,14.f);
-     g.setColour(grid()); g.drawRoundedRectangle(meterPanel.reduced(0.5f),14.f,1.f);
+     g.setColour(juce::Colour(0xff3a4148).withAlpha(0.85f)); g.drawRoundedRectangle(meterPanel.reduced(0.5f),14.f,1.4f);
  }
- // FIX ("ناب" cleanup): one label above (just "IN"/"OUT"), one number below (the live level) - the
- // separate always-on TRIM readout is gone; the fader thumb's position on the bar already shows the
- // trim, and this halves the amount of small text crowding the two meters.
- g.setFont(juce::FontOptions(9).withStyle("bold")); g.setColour(muted());
- g.drawText("IN",inputMeterArea.withY(inputMeterArea.getY()-16).withHeight(14),juce::Justification::centred);
- g.drawText("OUT",outputMeterArea.withY(outputMeterArea.getY()-16).withHeight(14),juce::Justification::centred);
- drawVerticalMeter(g,inputMeterArea,p.inputRmsDb.load(),p.inputPeakDb.load(),white());
- drawVerticalMeter(g,outputMeterArea,p.outputRmsDb.load(),p.outputPeakDb.load(),blue());
- drawMeterDbScale(g,inputMeterArea,outputMeterArea);
- g.setColour(white()); g.setFont(juce::FontOptions(10));
- g.drawText(juce::String(p.inputRmsDb.load(),1),inputMeterArea.withY(inputMeterArea.getBottom()+3).withHeight(14),juce::Justification::centred);
- g.drawText(juce::String(p.outputRmsDb.load(),1),outputMeterArea.withY(outputMeterArea.getBottom()+3).withHeight(14),juce::Justification::centred);
+ auto mp=meterPanel.reduced(10.f);
+ mp.removeFromTop(18.f); // room for the IN/OUT labels
+ auto mpBtnRow=mp.removeFromBottom(30.f); mp.removeFromBottom(8.f);
+ mp.removeFromBottom(18.f); // room for the live-level numbers
+ {
+     const float trimRailW=10.f, levelRailW=22.f, innerGap=8.f, groupGap=16.f;
+     const float groupW=trimRailW+innerGap+levelRailW;
+     auto inGroupFull=mp.removeFromLeft(groupW); mp.removeFromLeft(groupGap);
+     auto scaleArea=mp.removeFromLeft(juce::jmax(30.f,mp.getWidth()-groupW-groupGap)); mp.removeFromLeft(groupGap);
+     auto outGroupFull=mp;
+     auto inGroup=inGroupFull, outGroup=outGroupFull;
+     auto inTrimRail=inGroup.removeFromLeft(trimRailW); inGroup.removeFromLeft(innerGap); auto inLevelRail=inGroup;
+     auto outTrimRail=outGroup.removeFromLeft(trimRailW); outGroup.removeFromLeft(innerGap); auto outLevelRail=outGroup;
+     g.setFont(juce::FontOptions(9).withStyle("bold")); g.setColour(muted());
+     g.drawText("IN",inGroupFull.withY(inGroupFull.getY()-16).withHeight(14),juce::Justification::centred);
+     g.drawText("OUT",outGroupFull.withY(outGroupFull.getY()-16).withHeight(14),juce::Justification::centred);
+     // Plain trim rail background - just a thin track; the actual draggable dot is the real
+     // inputTrim/outputTrim JUCE Slider components, painted on top of this automatically.
+     auto drawTrimRailBg=[&](juce::Rectangle<float> r){ float cx=r.getCentreX(); g.setColour(juce::Colour(0xff242a31)); g.fillRoundedRectangle(cx-1.5f,r.getY(),3.f,r.getHeight(),1.5f); };
+     drawTrimRailBg(inTrimRail); drawTrimRailBg(outTrimRail);
+     drawVerticalMeter(g,inLevelRail,p.inputRmsDb.load(),p.inputPeakDb.load(),white());
+     drawVerticalMeter(g,outLevelRail,p.outputRmsDb.load(),p.outputPeakDb.load(),blue());
+     drawMeterDbScale(g,scaleArea,inLevelRail);
+     g.setColour(white()); g.setFont(juce::FontOptions(10));
+     g.drawText(juce::String(p.inputRmsDb.load(),1),inGroupFull.withY(inGroupFull.getBottom()+3).withHeight(14),juce::Justification::centred);
+     g.drawText(juce::String(p.outputRmsDb.load(),1),outGroupFull.withY(outGroupFull.getBottom()+3).withHeight(14),juce::Justification::centred);
+ }
  // FIX ("STATUS" confusion): the separate caption label is gone - it just floated there even when
  // idle with nothing next to it, which is exactly what was confusing. The status Label itself
  // (below, in resized()) is self-explanatory whenever it actually has something to say (e.g. "PEAK
@@ -921,13 +954,13 @@ void PQContentComponent::resized(){auto a=getLocalBounds();
  // FIX (layout - matches paint()): same chart/meterPanel split, since this is where the actual
  // meter/trim/button *components* (not just their drawing) get positioned.
  auto chartFull=a.reduced(24,72).withHeight(a.getHeight()*.48f);
- auto meterPanel=chartFull.removeFromRight(150.f);
+ auto meterPanel=chartFull.removeFromRight(180.f);
  chartFull.removeFromRight(16.f);
  auto chart=chartFull;
  int y=chart.getBottom()+70;
- // FIX (layout, per reference mockup - matches paint()): Mono Maker's own box on the far left, four
- // bordered zones (MATCH AMOUNT/FREQUENCY RANGE/STEREOIZATION/WIDTH AMT) to its right.
- const float monoBoxX=42.f, monoBoxW=210.f, panelGap=24.f;
+ // FIX (layout, per reference mockup - matches paint()): Mono Maker's own (now compact) box on the
+ // far left, four bordered zones (MATCH AMOUNT/FREQUENCY RANGE/STEREOIZATION/WIDTH AMT) to its right.
+ const float monoBoxX=42.f, monoBoxW=150.f, monoBoxH=170.f, panelGap=24.f;
  const float panelX=monoBoxX+monoBoxW+panelGap;
  const float panelRight=(float)a.getWidth()-42.f;
  const float panelW=panelRight-panelX;
@@ -940,28 +973,34 @@ void PQContentComponent::resized(){auto a=getLocalBounds();
  const float zoneCtrlW=zoneW-8.f;
  sAmt.setBounds((int)matchSliderX,y,(int)matchSliderW,22);mAmt.setBounds((int)matchSliderX,y+42,(int)matchSliderW,22);siAmt.setBounds((int)matchSliderX,y+84,(int)matchSliderW,22);
  low.setBounds((int)zone2X,y+18,(int)zoneCtrlW,22);high.setBounds((int)zone2X,y+66,(int)zoneCtrlW,22);
- // Mono Maker: vertical fader inside its own box, value box built into the slider (TextBoxBelow).
- monoMaker.setBounds((int)(monoBoxX+(monoBoxW-50.f)/2.f),y+6,50,162);
- // FIX (layout - meters relocated beside the chart): IN bar | OUT bar side by side near the top of
- // the panel, MATCH GAIN spanning the full width below them - replaces the old fixed 700/900,
- // y+62-relative spots that used to live down in the "FREQUENCY RANGE" box.
+ // Mono Maker: vertical fader inside its own (now compact) box - 100px of actual track + 20px for
+ // the built-in TextBoxBelow value readout, starting right under the "MONO MAKER" header.
+ monoMaker.setBounds((int)(monoBoxX+(monoBoxW-50.f)/2.f),(int)chart.getBottom()+76,50,120);
+ // FIX (two-rail meter groups, per reference - matches paint()): each side is now a thin trim rail
+ // (just the fader dot) next to a separate, slightly wider level rail (the glowing fill bar), instead
+ // of both overlaid on the same rect.
  {
      auto mp=meterPanel.reduced(10.f);
      mp.removeFromTop(18.f); // room for the IN/OUT labels drawn in paint()
      auto btnRow=mp.removeFromBottom(30.f); mp.removeFromBottom(8.f);
      mp.removeFromBottom(18.f); // room for the live-level numbers drawn in paint()
-     float gap=34.f, barW=(mp.getWidth()-gap)/2.f;
-     auto inBar=mp.removeFromLeft(barW); mp.removeFromLeft(gap); auto outBar=mp;
-     inputMeterArea=inBar.toFloat(); outputMeterArea=outBar.toFloat();
-     inputTrim.setBounds(inputMeterArea.toNearestInt()); outputTrim.setBounds(outputMeterArea.toNearestInt());
+     const float trimRailW=10.f, levelRailW=22.f, innerGap=8.f, groupGap=16.f;
+     const float groupW=trimRailW+innerGap+levelRailW;
+     auto inGroup=mp.removeFromLeft(groupW); mp.removeFromLeft(groupGap);
+     mp.removeFromLeft(juce::jmax(30.f,mp.getWidth()-groupW-groupGap)); mp.removeFromLeft(groupGap);
+     auto outGroup=mp;
+     auto inTrimRail=inGroup.removeFromLeft(trimRailW); inGroup.removeFromLeft(innerGap); auto inLevelRail=inGroup;
+     auto outTrimRail=outGroup.removeFromLeft(trimRailW); outGroup.removeFromLeft(innerGap); auto outLevelRail=outGroup;
+     inputMeterArea=inLevelRail.toFloat(); outputMeterArea=outLevelRail.toFloat();
+     inputTrim.setBounds(inTrimRail.toNearestInt()); outputTrim.setBounds(outTrimRail.toNearestInt());
      matchGainBtn.setBounds(btnRow.toNearestInt());
  }
  mode.setBounds((int)zone3X,y+18,(int)zoneCtrlW,25);widthStage.setBounds((int)zone3X,y+66,(int)zoneCtrlW,25);
  width.setBounds((int)zone4X,y+18,(int)zoneCtrlW,25);depth.setBounds((int)zone4X,y+66,(int)zoneCtrlW,25);
- // Buttons now sit directly under the Mono Maker box, matching the reference's layout, instead of
- // spanning under what used to be the MATCH AMOUNT column.
- capture.setBounds((int)monoBoxX,y+190,68,30);apply.setBounds((int)monoBoxX+74,y+190,62,30);clear.setBounds((int)monoBoxX+142,y+190,58,30);
- status.setBounds((int)zone1X,y+190,300,30);
+ // Buttons now sit directly under the (now compact) Mono Maker box, matching the reference's layout.
+ const int btnY=(int)chart.getBottom()+42+(int)monoBoxH+14;
+ capture.setBounds((int)monoBoxX,btnY,68,30);apply.setBounds((int)monoBoxX+74,btnY,62,30);clear.setBounds((int)monoBoxX+142,btnY,58,30);
+ status.setBounds((int)zone1X,btnY,300,30);
  // FIX (preset restructure): overlay now anchored under the preset list/kebab on the LEFT, where
  // those controls actually live - and shrunk (no more list row inside it) to just fit name/save/
  // delete. Still only visible while the kebab is toggled on.
