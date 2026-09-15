@@ -1,8 +1,5 @@
 #include "PluginEditor.h"
 namespace {juce::Colour white(){return juce::Colour(0xfff2f4f7);} juce::Colour yellow(){return juce::Colour(0xffffcf3f);} juce::Colour blue(){return juce::Colour(0xff55a8ff);} juce::Colour bg(){return juce::Colour(0xff07090c);} juce::Colour panel(){return juce::Colour(0xff101419);} juce::Colour grid(){return juce::Colour(0xff242a31);} juce::Colour muted(){return juce::Colour(0xff737e89);} juce::Colour dim(){return juce::Colour(0xff3a4148);}
-// Bypass indicator colour - a warm amber, distinct from the STEREO/MID/SIDE palette, so an engaged
-// bypass reads unambiguously as "something's different" rather than blending in with everything else.
-juce::Colour bypassColour(){return juce::Colour(0xffff9a3f);}
 // Manual-EQ per-target colours (item 2): distinct from, but recognisably related to, the
 // STEREO/MID/SIDE button colours above, so a glance at a node/curve tells you which signal it sits on.
 juce::Colour manualStereoColour(){return juce::Colour(0xffc7cdd3);} // off-white/grey, family with white()
@@ -177,7 +174,13 @@ PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcesso
  midEqToggle.setTooltip("Show manual EQ bands on Mid, and make Mid the target for new bands you add.");
  sideEqToggle.setTooltip("Show manual EQ bands on Side, and make Side the target for new bands you add.");
 
- auto bind=[this](juce::Slider&s,std::atomic<float>&v){setupSlider(s,0,100,.1);s.setValue(v.load()*100);s.onValueChange=[this,&s,&v]{v.store((float)s.getValue()/100.f);p.applyMatch();p.presetDirty.store(true);};};bind(sAmt,p.stereoMatch);bind(mAmt,p.midMatch);bind(siAmt,p.sideMatch);
+ // FIX (match amount too aggressive): full-scale on these sliders used to mean 100% of
+ // maxCorrectionDb applied per band - since adjacent bands' corrections stack when several want to
+ // push the same region the same way, that read as far more drastic than "100%" suggests. The
+ // slider's own range/display stays 0-100% (so it still reads naturally), but what actually reaches
+ // the DSP is capped at kMatchAmountCap of that - moving the slider all the way now applies what
+ // used to be ~30%, which is where it stopped sounding musical in testing.
+ auto bind=[this](juce::Slider&s,std::atomic<float>&v){setupSlider(s,0,100,.1);s.setValue(v.load()/kMatchAmountCap*100.f);s.setDoubleClickReturnValue(true,0.0);s.onValueChange=[this,&s,&v]{v.store((float)s.getValue()/100.f*kMatchAmountCap);p.applyMatch();p.presetDirty.store(true);};};bind(sAmt,p.stereoMatch);bind(mAmt,p.midMatch);bind(siAmt,p.sideMatch);
  sAmt.setTooltip("How strongly the captured reference corrects the Stereo signal, 0-100%.");
  mAmt.setTooltip("How strongly the captured reference corrects the Mid signal, 0-100%.");
  siAmt.setTooltip("How strongly the captured reference corrects the Side signal, 0-100%.");
@@ -191,12 +194,22 @@ PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcesso
  high.setTooltip("Correction is only applied below this frequency.");
  width.setTooltip("How much of the mono-widener effect to blend in, 0-100%.");
  depth.setTooltip("Scales the widener's delay/depth character - higher pushes the effect further.");
+ // Mono Maker: 0% = no effect, 100% = the whole signal collapses to mono. Fixed 24dB/oct slope,
+ // always runs after everything else (width included) regardless of PRE/POST - see processBlock.
+ setupSlider(monoMaker,0,100,.1); monoMaker.setLookAndFeel(&glowAccent);
+ monoMaker.setValue(p.monoMakerAmount.load()*100.0); monoMaker.setDoubleClickReturnValue(true,0.0);
+ monoMaker.setTooltip("Collapses Side to mono below a rising cutoff - 0% off, 100% the whole signal goes mono.");
+ monoMaker.onValueChange=[this]{ p.monoMakerAmount.store((float)monoMaker.getValue()/100.f); p.manualDirty.store(true); p.presetDirty.store(true); };
  // FIX: the frequency chart is drawn on a log scale (20Hz-20kHz), but these sliders were linear -
  // that mismatch is exactly why dragging near 20Hz raced across the whole chart while dragging near
  // 20kHz barely moved the line. A log-style skew around the geometric middle of the range
  // (sqrt(20*20000)) makes the slider's feel match what's actually drawn.
  low.setSkewFactorFromMidPoint(632.45); high.setSkewFactorFromMidPoint(632.45);
  low.setValue(p.lowHz);high.setValue(p.highHz);width.setValue(p.widthAmount.load()*100);depth.setValue(p.widthDepth.load()*100);
+ // Double-click any of these to snap back to its default - cheap, standard JUCE behaviour, and one
+ // less reason to hunt for an exact "reset" value by hand.
+ low.setDoubleClickReturnValue(true,20.0); high.setDoubleClickReturnValue(true,20000.0);
+ width.setDoubleClickReturnValue(true,0.0); depth.setDoubleClickReturnValue(true,100.0);
  low.onValueChange=[this]{p.lowHz=low.getValue();p.applyMatch();p.presetDirty.store(true);};high.onValueChange=[this]{p.highHz=high.getValue();p.applyMatch();p.presetDirty.store(true);};width.onValueChange=[this]{p.widthAmount=width.getValue()/100.f;p.presetDirty.store(true);};depth.onValueChange=[this]{p.widthDepth=depth.getValue()/100.f;p.presetDirty.store(true);};
 
  // Max dB / Smoothing used to live here as sliders; they're fixed at sane working values in the
@@ -205,6 +218,7 @@ PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcesso
  setupVerticalTrim(inputTrim); setupVerticalTrim(outputTrim);
  inputTrim.setRange(-24,24,.1); outputTrim.setRange(-24,24,.1);
  inputTrim.setValue(p.inputTrimDb.load()); outputTrim.setValue(p.outputTrimDb.load());
+ inputTrim.setDoubleClickReturnValue(true,0.0); outputTrim.setDoubleClickReturnValue(true,0.0);
  inputTrim.setTooltip("Input trim, +/-24dB, applied before any processing.");
  outputTrim.setTooltip("Output trim, +/-24dB, applied after everything else - this is what MATCH GAIN adjusts.");
  inputTrim.onValueChange=[this]{p.inputTrimDb.store((float)inputTrim.getValue());p.presetDirty.store(true);};
@@ -243,15 +257,15 @@ PQAudioProcessorEditor::PQAudioProcessorEditor(PQAudioProcessor&x):AudioProcesso
 
  // Simple true-bypass toggle - deliberately not persisted (see PQAudioProcessor::bypassed), so it
  // always opens un-bypassed regardless of what preset/session is loaded.
- setupButton(bypass,white());
- bypass.setTooltip("Bypass all correction/EQ/width - hear the raw (trim-adjusted) input for A/B comparison.");
+ addAndMakeVisible(bypass);
+ bypass.setTooltip("Bypass all correction/EQ/width - hear the raw (trim-adjusted) input for A/B comparison. Shortcut: Space.");
  bypass.onClick=[this]{ p.bypassed.store(!p.bypassed.load()); refreshBypassButton(); };
  refreshBypassButton();
 
  addAndMakeVisible(mode);addAndMakeVisible(status);status.setColour(juce::Label::textColourId,muted());status.setJustificationType(juce::Justification::centredRight);startTimerHz(20);
 }
 PQAudioProcessorEditor::~PQAudioProcessorEditor(){
-    for(auto*s:{&sAmt,&mAmt,&siAmt,&low,&high,&width,&depth}) s->setLookAndFeel(nullptr);
+    for(auto*s:{&sAmt,&mAmt,&siAmt,&low,&high,&width,&depth,&monoMaker}) s->setLookAndFeel(nullptr);
     setLookAndFeel(nullptr);
 }
 
@@ -276,13 +290,14 @@ void PQAudioProcessorEditor::timerCallback(){
 // (manual EQ is read straight from the processor every paint, but the plain juce::Slider/ComboBox
 // controls below the chart cache their own value and need to be told explicitly).
 void PQAudioProcessorEditor::syncControlsFromProcessor(){
- sAmt.setValue(p.stereoMatch.load()*100,juce::dontSendNotification);
- mAmt.setValue(p.midMatch.load()*100,juce::dontSendNotification);
- siAmt.setValue(p.sideMatch.load()*100,juce::dontSendNotification);
+ sAmt.setValue(p.stereoMatch.load()/kMatchAmountCap*100.f,juce::dontSendNotification);
+ mAmt.setValue(p.midMatch.load()/kMatchAmountCap*100.f,juce::dontSendNotification);
+ siAmt.setValue(p.sideMatch.load()/kMatchAmountCap*100.f,juce::dontSendNotification);
  low.setValue(p.lowHz.load(),juce::dontSendNotification);
  high.setValue(p.highHz.load(),juce::dontSendNotification);
  width.setValue(p.widthAmount.load()*100,juce::dontSendNotification);
  depth.setValue(p.widthDepth.load()*100,juce::dontSendNotification);
+ monoMaker.setValue(p.monoMakerAmount.load()*100.0,juce::dontSendNotification);
  mode.setSelectedId((int)p.widthMode.load()+1,juce::dontSendNotification);
  widthStage.setButtonText(p.widthPostEq.load()?"POST":"PRE");
  inputTrim.setValue(p.inputTrimDb.load(),juce::dontSendNotification);
@@ -304,15 +319,11 @@ void PQAudioProcessorEditor::refreshBandButtons(){
  mid.setToggleState(p.midOn.load(),juce::dontSendNotification); mid.repaint();
  side.setToggleState(p.sideOn.load(),juce::dontSendNotification); side.repaint();
 }
-// Bypass reads as muted grey when off (matches the other header buttons) and switches to a warm
-// amber fill - not just text colour - when engaged, so it's unmistakable at a glance even from
-// across a room, the way a hardware bypass switch's LED would be.
+// Bypass reads as muted grey with a hollow power icon when off, and switches to a solid amber fill
+// with a filled black icon when engaged - unmistakable at a glance, the way a hardware bypass
+// switch's LED would be. See BypassButton::paintButton for the actual drawing.
 void PQAudioProcessorEditor::refreshBypassButton(){
- bool on=p.bypassed.load();
- bypass.setColour(juce::TextButton::buttonColourId, on?bypassColour():panel());
- bypass.setColour(juce::TextButton::textColourOffId, on?juce::Colours::black:muted());
- bypass.setColour(juce::TextButton::textColourOnId, on?juce::Colours::black:muted());
- bypass.repaint();
+ bypass.setOn(p.bypassed.load());
 }
 
 void PQAudioProcessorEditor::setupButton(juce::TextButton&b,juce::Colour c){addAndMakeVisible(b);b.setColour(juce::TextButton::buttonColourId,panel());b.setColour(juce::TextButton::buttonOnColourId,grid());b.setColour(juce::TextButton::textColourOffId,c);b.setColour(juce::TextButton::textColourOnId,c);}
@@ -385,6 +396,25 @@ void PQAudioProcessorEditor::drawRef(juce::Graphics&g,juce::Rectangle<float>r,co
  g.setColour(c.withAlpha(.22f));g.strokePath(q,juce::PathStrokeType(1.f));
 }
 
+// Delta overlay: renders corrStereo/corrMid/corrSide (the actual per-band correction gain the
+// auto-match is applying, in dB) using the same log-frequency x-mapping and +/-kManualGainRangeDb
+// y-mapping (freqToX/gainDbToY) as the manual EQ chart, so it lines up exactly with what the manual
+// nodes are doing. Points are placed at the kBands correction-band centre frequencies
+// (PQAudioProcessor::bandHz), not the kBins analyzer resolution - there are far fewer of them, so
+// the curve is naturally smooth without needing the analyzer's own smoothing pass.
+void PQAudioProcessorEditor::drawDeltaCurve(juce::Graphics& g, const std::array<std::atomic<float>,PQAudioProcessor::kBands>& corr, juce::Colour c){
+    juce::Path q;
+    for(int i=0;i<PQAudioProcessor::kBands;++i){
+        float t=i/float(PQAudioProcessor::kBands-1);
+        float hz=std::exp(std::log(20.f)+t*(std::log(20000.f)-std::log(20.f)));
+        float x=freqToX(hz), y=gainDbToY(corr[(size_t)i].load());
+        if(i==0) q.startNewSubPath(x,y); else q.lineTo(x,y);
+    }
+    juce::Path dashed; float dashLengths[]={5.f,4.f};
+    juce::PathStrokeType(1.4f).createDashedStroke(dashed,q,dashLengths,2);
+    g.setColour(c.withAlpha(0.6f)); g.fillPath(dashed);
+}
+
 // New: shades the parts of the analyzer that fall outside the current Low/High Hz match range,
 // so the frequency-range sliders now have a visible effect on the chart itself (this was
 // previously invisible - the range only affected the DSP, not what you could see).
@@ -410,8 +440,21 @@ void PQAudioProcessorEditor::drawVerticalMeter(juce::Graphics&g,juce::Rectangle<
  g.setColour(panel()); g.fillRoundedRectangle(r,5.f);
  g.setColour(grid()); g.drawRoundedRectangle(r,5.f,1.f);
  constexpr float kFloorDb=-60.f;
+ auto fillR=r.reduced(4.f);
+ // FIX (requested): faint graduation ticks behind the fill, so the ear can be backed up by the eye -
+ // no numbers (that was the earlier, busier version we deliberately simplified away from), just short
+ // marks at a few standard reference points, dim enough to read as texture rather than clutter.
+ {
+     static const float ticks[]={0.f,-6.f,-12.f,-24.f,-40.f};
+     g.setColour(juce::Colours::white.withAlpha(0.10f));
+     for(float db:ticks){
+         float tt=juce::jlimit(0.f,1.f,(db-kFloorDb)/(0.f-kFloorDb));
+         float ty=fillR.getBottom()-fillR.getHeight()*tt;
+         g.fillRect(juce::Rectangle<float>(fillR.getX()+2.f,ty-0.5f,fillR.getWidth()-4.f,1.f));
+     }
+ }
  float t=juce::jlimit(0.f,1.f,(levelDb-kFloorDb)/(0.f-kFloorDb));
- auto fillR=r.reduced(4.f); float fillH=fillR.getHeight()*t;
+ float fillH=fillR.getHeight()*t;
  auto bar=juce::Rectangle<float>(fillR.getX(),fillR.getBottom()-fillH,fillR.getWidth(),fillH);
  juce::ColourGradient grad(c.withAlpha(.35f),bar.getX(),fillR.getBottom(),
                             t>0.92f?yellow():c.withAlpha(.95f),bar.getX(),fillR.getY(),false);
@@ -617,6 +660,11 @@ void PQAudioProcessorEditor::mouseWheelMove(const juce::MouseEvent& e, const juc
 // FIX (item 4): Delete/Backspace removes the currently selected manual-EQ node (see mouseDown,
 // which sets selectedBand on every left- or right-click that hits an existing node).
 bool PQAudioProcessorEditor::keyPressed(const juce::KeyPress& k){
+    // Space = toggle Bypass, the way most host transports/plugins treat it - skipped while a text
+    // editor (e.g. the preset name box) has focus, so typing a space in a preset name still works.
+    if(k==juce::KeyPress::spaceKey && dynamic_cast<juce::TextEditor*>(juce::Component::getCurrentlyFocusedComponent())==nullptr){
+        p.bypassed.store(!p.bypassed.load()); refreshBypassButton(); return true;
+    }
     if(selectedBand>=0 && (k==juce::KeyPress::deleteKey || k==juce::KeyPress::backspaceKey)){
         p.removeManualBand(selectedBand);
         if(draggingBand==selectedBand) draggingBand=-1;
@@ -715,6 +763,13 @@ void PQAudioProcessorEditor::paint(juce::Graphics&g){
  // nothing can ever visually escape it, regardless of the underlying data.
  juce::Path chartClip; chartClip.addRoundedRectangle(chart,14.f);
  g.saveState(); g.reduceClipRegion(chartClip);
+ // Subtle brand watermark - low enough alpha to read as texture, not compete with the curves drawn
+ // on top of it. Bottom-right corner, same spot most plugins tuck their mark into.
+ {
+     g.setColour(juce::Colours::white.withAlpha(0.035f));
+     g.setFont(juce::FontOptions(72).withStyle("bold"));
+     g.drawText("PQ",chart.reduced(18.f),juce::Justification::bottomRight);
+ }
  // FIX (item 4): each of Stereo/Mid/Side is now drawn purely from its own independent on/off flag,
  // so any combination is visible at once - not just whichever single one used to be "soloed".
  if(p.hasReference.load()){
@@ -725,6 +780,13 @@ void PQAudioProcessorEditor::paint(juce::Graphics&g){
  if(p.stereoOn.load()) drawCurve(g,chart,p.stereoCurve,white());
  if(p.midOn.load()) drawCurve(g,chart,p.midCurve,yellow());
  if(p.sideOn.load()) drawCurve(g,chart,p.sideCurve,blue());
+ // Delta overlay (per request): the actual correction curve being applied, dashed, per visible
+ // target - only meaningful once there's something to correct toward.
+ if(p.hasReference.load()){
+     if(p.stereoOn.load()) drawDeltaCurve(g,p.corrStereo,white());
+     if(p.midOn.load()) drawDeltaCurve(g,p.corrMid,yellow());
+     if(p.sideOn.load()) drawDeltaCurve(g,p.corrSide,blue());
+ }
  drawManualEq(g);
  g.restoreState();
  label(g,"20 Hz",{chart.getX(),chart.getBottom()-18,60,18},muted());label(g,"1 kHz",{chart.getCentreX()-25,chart.getBottom()-18,50,18},muted());label(g,"20 kHz",{chart.getRight()-60,chart.getBottom()-18,60,18},muted());
@@ -734,19 +796,23 @@ void PQAudioProcessorEditor::paint(juce::Graphics&g){
      juce::ColourGradient panelGrad(juce::Colour(0xff141a22),ctrlPanel.getX(),ctrlPanel.getY(),juce::Colour(0xff0c0f14),ctrlPanel.getX(),ctrlPanel.getBottom(),false);
      g.setGradientFill(panelGrad); g.fillRoundedRectangle(ctrlPanel,14.f);
  }
- // FIX (layout balance): the two bottom columns are now computed as actual symmetric halves of the
- // available width (with a fixed gutter between them) instead of fixed pixel offsets left over from
- // when the window was narrower - that's what let the right column's sliders stay a fixed 185px while
- // the panel around them kept growing, reading as lopsided/empty on one side. Identical block in
- // resized() below positions the real slider/combo/button components the same way.
- const float colLeft=42.f, colRight=a.getWidth()-42.f, gutter=60.f;
- const float colW=(colRight-colLeft-gutter)*0.5f;
- const float leftColX=colLeft, rightColX=colLeft+colW+gutter;
+ // FIX (layout balance, take 2): the previous "symmetric proportional halves" fix let every slider
+ // grow with the window - on a wide window that reads as absurdly long/stretched rather than
+ // balanced (exactly what showed up in testing). Professional plugins fix their control widths and
+ // just leave extra space as margin around a fixed-width block when the window's made bigger, so
+ // that's what this does now: every slider/combo width below is capped, and only the LEFT margin
+ // grows/shrinks with the window. Identical block in resized() below positions the real components.
  const float sliderIndent=103.f; // room for the row label before the slider starts
- const float rightGap=40.f, rightHalfW=(colW-rightGap)*0.5f, rightCol2X=rightColX+rightHalfW+rightGap;
+ const float maxMatchSliderW=380.f, maxRightHalfW=260.f, gutter=60.f, rightGap=40.f;
+ const float leftColX=42.f;
+ const float rightColX=leftColX+sliderIndent+maxMatchSliderW+gutter;
+ const float rightCol2X=rightColX+maxRightHalfW+rightGap;
  label(g,"MATCH AMOUNT",{leftColX,chart.getBottom()+47,150,18},muted());label(g,"FREQUENCY RANGE",{rightColX,chart.getBottom()+47,180,18},muted());
  int y=(int)chart.getBottom()+70;
  label(g,"STEREO",{leftColX+3,(float)y+2,80,18},white()); label(g,"MID",{leftColX+3,(float)y+44,80,18},yellow()); label(g,"SIDE",{leftColX+3,(float)y+86,80,18},blue());
+ // Mono Maker sits right under the match-amount sliders, in the space that column otherwise left
+ // empty - both fixes the layout balance and gives the column a genuine second purpose.
+ label(g,"MONO MAKER",{leftColX+3,(float)y+128,110,18},juce::Colour(0xffbfe0ff));
  label(g,"LOW HZ",{rightColX,(float)y+2,100,18},muted()); label(g,"HIGH HZ",{rightCol2X,(float)y+2,100,18},muted());
  // FIX (layout - your mockup): MODE/WIDTH/STAGE/DEPTH moved out of their old disconnected spot
  // (floating below MATCH AMOUNT, in a column with nothing above or below it) and into the same right
@@ -809,16 +875,17 @@ void PQAudioProcessorEditor::resized(){auto a=getLocalBounds();
  chartFull.removeFromRight(16.f);
  auto chart=chartFull;
  int y=chart.getBottom()+70;
- // FIX (layout balance - matches paint()): identical symmetric two-column computation, so the real
- // components land exactly where their labels/track backgrounds were drawn.
- const float colLeft=42.f, colRight=(float)a.getWidth()-42.f, gutter=60.f;
- const float colW=(colRight-colLeft-gutter)*0.5f;
- const float leftColX=colLeft, rightColX=colLeft+colW+gutter;
+ // FIX (layout balance, take 2 - matches paint()): fixed-width capped columns, only the left margin
+ // grows/shrinks with the window - see the comment in paint() for why.
  const float sliderIndent=103.f;
- const float rightGap=40.f, rightHalfW=(colW-rightGap)*0.5f, rightCol2X=rightColX+rightHalfW+rightGap;
- const float matchSliderX=leftColX+sliderIndent, matchSliderW=colW-sliderIndent-8.f;
- sAmt.setBounds((int)matchSliderX,y,(int)matchSliderW,22);mAmt.setBounds((int)matchSliderX,y+42,(int)matchSliderW,22);siAmt.setBounds((int)matchSliderX,y+84,(int)matchSliderW,22);
- low.setBounds((int)rightColX,y+18,(int)rightHalfW,22);high.setBounds((int)rightCol2X,y+18,(int)rightHalfW,22);
+ const float maxMatchSliderW=380.f, maxRightHalfW=260.f, gutter=60.f, rightGap=40.f;
+ const float leftColX=42.f;
+ const float rightColX=leftColX+sliderIndent+maxMatchSliderW+gutter;
+ const float rightCol2X=rightColX+maxRightHalfW+rightGap;
+ const float matchSliderX=leftColX+sliderIndent;
+ sAmt.setBounds((int)matchSliderX,y,(int)maxMatchSliderW,22);mAmt.setBounds((int)matchSliderX,y+42,(int)maxMatchSliderW,22);siAmt.setBounds((int)matchSliderX,y+84,(int)maxMatchSliderW,22);
+ monoMaker.setBounds((int)matchSliderX,y+126,(int)maxMatchSliderW,22);
+ low.setBounds((int)rightColX,y+18,(int)maxRightHalfW,22);high.setBounds((int)rightCol2X,y+18,(int)maxRightHalfW,22);
  // FIX (layout - meters relocated beside the chart): IN bar | OUT bar side by side near the top of
  // the panel, MATCH GAIN spanning the full width below them - replaces the old fixed 700/900,
  // y+62-relative spots that used to live down in the "FREQUENCY RANGE" box.
@@ -833,7 +900,7 @@ void PQAudioProcessorEditor::resized(){auto a=getLocalBounds();
      inputTrim.setBounds(inputMeterArea.toNearestInt()); outputTrim.setBounds(outputMeterArea.toNearestInt());
      matchGainBtn.setBounds(btnRow.toNearestInt());
  }
- mode.setBounds((int)rightColX,y+115,(int)rightHalfW,25);width.setBounds((int)rightCol2X,y+115,(int)rightHalfW,25);widthStage.setBounds((int)rightColX,y+147,90,25);depth.setBounds((int)rightCol2X,y+147,(int)rightHalfW,25);capture.setBounds(42,y+190,90,30);apply.setBounds(140,y+190,80,30);clear.setBounds(230,y+190,75,30);
+ mode.setBounds((int)rightColX,y+115,(int)maxRightHalfW,25);width.setBounds((int)rightCol2X,y+115,(int)maxRightHalfW,25);widthStage.setBounds((int)rightColX,y+147,90,25);depth.setBounds((int)rightCol2X,y+147,(int)maxRightHalfW,25);capture.setBounds(42,y+190,90,30);apply.setBounds(140,y+190,80,30);clear.setBounds(230,y+190,75,30);
  status.setBounds(325,y+190,300,30);
  // FIX (preset restructure): overlay now anchored under the preset list/kebab on the LEFT, where
  // those controls actually live - and shrunk (no more list row inside it) to just fit name/save/
