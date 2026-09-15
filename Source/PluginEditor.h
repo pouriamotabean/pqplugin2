@@ -60,7 +60,7 @@ private:
 
 // Small square "manage presets" icon button (a vertical kebab/more-options glyph) - replaces the old
 // wide PRESETS text button now that the preset list itself is always visible in the header (see
-// PQAudioProcessorEditor::presetList); this just opens/closes the Save/Delete overlay (PresetPanel).
+// PQContentComponent::presetList); this just opens/closes the Save/Delete overlay (PresetPanel).
 class KebabButton : public juce::Button {
 public:
     KebabButton():juce::Button({}){}
@@ -75,7 +75,7 @@ public:
 };
 
 // ---- Preset panel (item 6, restructured) ------------------------------------------------------
-// The preset list itself is now always visible in the main header (PQAudioProcessorEditor::
+// The preset list itself is now always visible in the main header (PQContentComponent::
 // presetList) rather than hidden inside this panel - picking a preset is a one-click affair, same
 // as any normal dropdown. This panel is now just the "manage" popover (opened from the small kebab
 // icon next to the list): naming and saving a new preset, or deleting the currently-selected one.
@@ -160,7 +160,7 @@ private:
 // A real power/bypass glyph (the universal "circle with a break at top + vertical line through it")
 // next to the text, instead of a plain text-only button - small detail, but this kind of thing is
 // what reads as "made with care" rather than a placeholder. on/off state is pushed in externally via
-// setOn() (see PQAudioProcessorEditor::refreshBypassButton()), same reasoning as DotTabButton above.
+// setOn() (see PQContentComponent::refreshBypassButton()), same reasoning as DotTabButton above.
 class BypassButton : public juce::TextButton {
 public:
     using juce::TextButton::TextButton;
@@ -184,8 +184,17 @@ private:
     bool on=false;
 };
 
-class PQAudioProcessorEditor:public juce::AudioProcessorEditor,private juce::Timer{
-public: explicit PQAudioProcessorEditor(PQAudioProcessor&); ~PQAudioProcessorEditor() override; void paint(juce::Graphics&)override; void resized()override;
+// FIX (full-window scaling): this used to BE the plugin's top-level AudioProcessorEditor, laid out
+// entirely in fixed absolute pixels. Resizing the host window just moved those fixed pixels around,
+// which is why parts of the UI could fall outside the visible area at small sizes instead of
+// shrinking with everything else. It's now a plain Component, always kept at a fixed design size
+// (1320x760 - see the constructor) and never resized itself; the actual top-level editor
+// (PQAudioProcessorEditor, defined further down) is a thin wrapper that scales this whole component
+// via a Component::Transform to fit whatever size the host window actually is. Every existing
+// absolute-pixel paint()/resized() calculation below is completely unchanged - it's still laying out
+// a fixed 1320x760 canvas exactly as before; only what happens to that finished canvas differs.
+class PQContentComponent:public juce::Component,private juce::Timer{
+public: explicit PQContentComponent(PQAudioProcessor&); ~PQContentComponent() override; void paint(juce::Graphics&)override; void resized()override;
  // Manual EQ (Pro-Q style) is mouse-only - no sliders/knobs at all - so it lives on the chart itself.
  void mouseDown(const juce::MouseEvent&) override; void mouseDrag(const juce::MouseEvent&) override;
  void mouseUp(const juce::MouseEvent&) override; void mouseDoubleClick(const juce::MouseEvent&) override;
@@ -277,5 +286,19 @@ private:
  void showBandTypeMenu(int bandIndex, juce::Point<int> screenPos);
  void showAddBandMenu(juce::Point<float> chartPos, juce::Point<int> screenPos);
  static juce::String manualTypeLabel(PQAudioProcessor::ManualType);
- JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PQAudioProcessorEditor)
+ JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PQContentComponent)
+};
+
+// The real top-level editor JUCE talks to (PQAudioProcessor::createEditor() returns one of these).
+// Owns a single fixed-size PQContentComponent and scales it uniformly to fill whatever size the host
+// window actually is - see resized() in the .cpp. This is deliberately as small/dumb as possible:
+// all the actual UI logic stays in PQContentComponent, untouched.
+class PQAudioProcessorEditor : public juce::AudioProcessorEditor {
+public:
+    explicit PQAudioProcessorEditor(PQAudioProcessor&);
+    void resized() override;
+private:
+    static constexpr int kDesignW=1320, kDesignH=760; // must match PQContentComponent's fixed setSize()
+    PQContentComponent content;
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PQAudioProcessorEditor)
 };
