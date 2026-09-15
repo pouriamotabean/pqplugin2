@@ -857,30 +857,30 @@ void PQContentComponent::paint(juce::Graphics&g){
      const float monoBoxX=42.f, monoBoxW=150.f, monoBoxH=150.f;
      const float ctrlPanelH=10.f+monoBoxH+14.f+30.f+20.f; // top pad + box + gap + button row + bottom pad
      auto ctrlPanel=juce::Rectangle<float>(24.f,chart.getBottom()+32.f,a.getWidth()-48.f,ctrlPanelH);
-     // FIX (was wrong - corrected): the previous version raised roughly HALF the panel's width,
-     // which read as one giant curve across the whole bottom edge - exactly what was asked not to
-     // do. The bottom edge is now straight everywhere except one small, genuinely localized notch
-     // (about 90px wide) right at the seam where the Mono Maker module meets the main tray - a tiny
-     // carved detail, not a restructuring of the panel's overall shape.
+     // FIX (was a bump, corrected to a step): the previous version rose up and immediately came back
+     // down (a small hill in the middle of a flat line). What's wanted is a permanent TWO-LEVEL STEP:
+     // deep (full height) under Mono Maker/the action buttons on the left, shallow (shorter) for the
+     // entire rest of the panel's width to the right - with one short, localized Bezier transition at
+     // the seam between the two, not a curve that returns to the original level.
      juce::Path panelPath;
      {
          constexpr float pi=juce::MathConstants<float>::pi;
          const float cornerR=16.f;
-         const float notchRise=8.f;                              // very subtle - just a small carved detail
-         const float notchCenterX=monoBoxX+monoBoxW+12.f;        // right at the Mono Maker / main tray seam
-         const float notchHalfWidth=45.f;                        // small - ~90px total, nowhere near the full width
+         const float stepRise=16.f;                           // how much shallower the right (everything past Mono Maker) is
+         const float seamX=monoBoxX+monoBoxW+110.f;           // comfortably past CLEAR's right edge
+         const float transitionWidth=80.f;                    // short and localized, not a long gradual slope
          float left=ctrlPanel.getX(), top=ctrlPanel.getY(), right=ctrlPanel.getRight();
-         float yBase=ctrlPanel.getBottom(), yNotch=yBase-notchRise;
-         float notchStart=notchCenterX-notchHalfWidth, notchEnd=notchCenterX+notchHalfWidth;
+         float yDeep=ctrlPanel.getBottom();                    // left side (Mono Maker/buttons) - full depth, unchanged
+         float yShallow=yDeep-stepRise;                        // right side (everything else) - permanently shallower
+         float transStart=seamX-transitionWidth*0.5f, transEnd=seamX+transitionWidth*0.5f;
          panelPath.startNewSubPath(left, top+cornerR);
          panelPath.addArc(left, top, cornerR*2.f, cornerR*2.f, pi*1.5f, pi*2.f, false);                              // top-left
          panelPath.addArc(right-cornerR*2.f, top, cornerR*2.f, cornerR*2.f, 0.f, pi*0.5f, false);                    // top-right
-         panelPath.addArc(right-cornerR*2.f, yBase-cornerR*2.f, cornerR*2.f, cornerR*2.f, pi*0.5f, pi, false);       // bottom-right (normal, straight edge)
-         panelPath.lineTo(notchEnd, yBase);                                                                           // flat bottom, right of the notch
-         panelPath.cubicTo(notchEnd-notchHalfWidth*0.6f,yBase, notchCenterX+notchHalfWidth*0.3f,yNotch, notchCenterX,yNotch); // rise into the notch
-         panelPath.cubicTo(notchCenterX-notchHalfWidth*0.3f,yNotch, notchStart+notchHalfWidth*0.6f,yBase, notchStart,yBase);  // back down out of it
-         panelPath.lineTo(left+cornerR, yBase);                                                                       // flat bottom, everywhere else (straight)
-         panelPath.addArc(left, yBase-cornerR*2.f, cornerR*2.f, cornerR*2.f, pi, pi*1.5f, false);                    // bottom-left (normal, straight edge)
+         panelPath.addArc(right-cornerR*2.f, yShallow-cornerR*2.f, cornerR*2.f, cornerR*2.f, pi*0.5f, pi, false);    // bottom-right - SHALLOW, stays this way to the seam
+         panelPath.lineTo(transEnd, yShallow);                                                                        // flat shallow shelf (all of Match Amount/Freq/Stereo/Width)
+         panelPath.cubicTo(transEnd-transitionWidth*0.4f,yShallow, transStart+transitionWidth*0.4f,yDeep, transStart,yDeep); // the one short step transition
+         panelPath.lineTo(left+cornerR, yDeep);                                                                       // flat deep shelf under Mono Maker/buttons, unchanged
+         panelPath.addArc(left, yDeep-cornerR*2.f, cornerR*2.f, cornerR*2.f, pi, pi*1.5f, false);                    // bottom-left - DEEP, permanently
          panelPath.closeSubPath();
      }
      juce::DropShadow panelShadow(juce::Colours::black.withAlpha(0.55f),16,juce::Point<int>(0,6));
